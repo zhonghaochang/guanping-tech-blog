@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>changzhonghao 的技术博客</title>
   <meta name="description" content="记录 DeepSearch、多模态 Agent、后训练与工程复现。" />
-  <meta name="theme-color" content="#ffffff" />
+  <meta name="theme-color" content="#f4f3d9" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/" />
   <meta property="og:locale" content="zh_CN" />
   <meta property="og:type" content="website" />
@@ -16,48 +16,78 @@
   <meta name="twitter:card" content="summary" />
   <link rel="icon" href="assets/favicon.svg" />
   <link rel="manifest" href="site.webmanifest" />
-  <link rel="stylesheet" href="assets/styles.css" />
+  <link rel="stylesheet" href="assets/styles.css?v=3" />
 </head>
 <body>
   <header class="site-header">
     <nav class="nav" aria-label="主导航">
-      <a class="brand" href="index.html"><span class="brand-mark">C</span><span>changzhonghao</span><span class="brand-note">Technical Blog</span></a>
+      <a class="brand" href="index.html"><span class="brand-mark">C</span><span>changzhonghao 的技术博客</span><span class="brand-note">关于模型、搜索与训练</span></a>
       <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
       <div class="nav-links" id="site-navigation">
-        <a aria-current="page" href="index.html">文章</a>
+        <a aria-current="page" href="index.html">首页</a>
+        <a href="archives.html">归档</a>
         <a href="about.html">关于</a>
         <button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button>
       </div>
     </nav>
   </header>
 
-  <main class="blog-home">
-    <header class="blog-intro">
-      <h1>changzhonghao</h1>
-      <p>记录 DeepSearch、多模态 Agent、后训练与工程复现。</p>
-    </header>
+  <main class="home-layout">
+    <div class="content-column">
+      <p class="section-label">最新发布</p>
+      <article class="featured-post" data-search-item>
+        <h1><a href="posts/deepsearch-from-zero.html">一条 DeepSearch 轨迹是怎样训练出来的？</a></h1>
+        <div class="post-meta"><span>分类：DeepSearch / Post-training</span><time datetime="2026-07-12">2026 年 7 月 12 日</time></div>
+        <p>如果只看最终回答，DeepSearch 和普通问答没有区别。真正需要训练的是中间过程：模型为什么发起搜索，工具返回了什么，以及什么时候证据已经足够。</p>
+        <p>本文从一条完整轨迹出发，依次拆解 Harness、SFT messages、assistant-only loss mask、RL rollout、reward 与错误后的 token mask。</p>
+        <a class="read-more" href="posts/deepsearch-from-zero.html">继续阅读全文 »</a>
+      </article>
 
-    <section aria-labelledby="posts-title">
-      <div class="posts-heading"><h2 id="posts-title">文章</h2><span>按更新时间排序</span></div>
-      <div class="post-list">
-        <article class="post-item">
-          <div class="post-meta"><time datetime="2026-07-12">2026-07-12</time><span>DeepSearch · SFT · RL</span></div>
-          <h2><a href="posts/deepsearch-from-zero.html">一条 DeepSearch 轨迹是怎样训练出来的？</a></h2>
-          <p>逐轮拆开 action、observation 与 Harness，再比较 SFT 样本、loss mask、RL rollout 和奖励是怎样组织的。</p>
-          <a class="post-link" href="posts/deepsearch-from-zero.html">阅读全文 →</a>
-        </article>
+      <section class="recent-section" aria-labelledby="recent-title">
+        <h2 id="recent-title">最新文章</h2>
+        <p class="search-status" data-search-status aria-live="polite"></p>
+        <ol class="recent-list">
+          <li data-search-item>
+            <time datetime="2026-07-12">2026 年 7 月 12 日</time><span>»</span>
+            <a href="posts/agent-harness-multimodal-search.html">多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness</a>
+            <p>核对 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 与 OpenSearch-VL 的样本、训练与工具环境。</p>
+          </li>
+          <li data-search-item>
+            <time datetime="2026-07-12">2026 年 7 月 12 日</time><span>»</span>
+            <a href="posts/deepsearch-from-zero.html">一条 DeepSearch 轨迹是怎样训练出来的？</a>
+            <p>从运行时消息、SFT loss mask 到 RL rollout，拆开一个搜索 Agent 的训练样本。</p>
+          </li>
+        </ol>
+        <a class="archive-link" href="archives.html">查看全部文章……</a>
+      </section>
+    </div>
 
-        <article class="post-item">
-          <div class="post-meta"><time datetime="2026-07-12">2026-07-12</time><span>Multimodal · Literature Review</span></div>
-          <h2><a href="posts/agent-harness-multimodal-search.html">多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness</a></h2>
-          <p>对照 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 与 OpenSearch-VL，核对样本量、训练设置、工具环境和长轨迹处理。</p>
-          <a class="post-link" href="posts/agent-harness-multimodal-search.html">阅读全文 →</a>
-        </article>
-      </div>
-    </section>
+    <aside class="sidebar" aria-label="站点信息">
+      <section class="side-card search-card">
+        <h2>搜索</h2>
+        <form class="site-search" data-site-search>
+          <label class="sr-only" for="site-search-input">搜索文章</label>
+          <input id="site-search-input" type="search" placeholder="标题、主题或关键词" autocomplete="off" />
+          <button type="submit">搜索</button>
+        </form>
+      </section>
+      <section class="side-card">
+        <h2>关于本站</h2>
+        <p>我是 changzhonghao。这里记录我对 DeepSearch、多模态 Agent 和后训练的论文调研与工程复现。</p>
+        <ul class="side-list"><li>文章：<a href="archives.html">2 篇</a></li><li>持续更新中</li></ul>
+      </section>
+      <section class="side-card">
+        <h2>主题</h2>
+        <ul class="topic-list"><li>DeepSearch</li><li>Multimodal Agent</li><li>SFT / RL</li><li>Harness Engineering</li></ul>
+      </section>
+      <section class="side-card">
+        <h2>链接</h2>
+        <p><a href="https://github.com/zhonghaochang">GitHub</a> · <a href="about.html">关于</a></p>
+      </section>
+    </aside>
   </main>
 
-  <footer class="footer"><div class="footer-inner"><span>© 2026 changzhonghao</span><span>DeepSearch · Multimodal Agents · Post-training</span><a href="about.html">关于 →</a></div></footer>
-  <script src="assets/app.js?v=2"></script>
+  <footer class="footer"><div class="footer-inner"><span>© 2026 changzhonghao</span><span>写清楚一个具体的技术问题。</span><a href="archives.html">文章归档 »</a></div></footer>
+  <script src="assets/app.js?v=3"></script>
 </body>
 </html>

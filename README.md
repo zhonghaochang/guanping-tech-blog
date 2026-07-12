@@ -20,6 +20,7 @@ python -m http.server 8000
 ## 文件结构
 
 - `index.html`：主页
+- `archives.html`：文章归档
 - `about.html`：关于页
 - `posts/deepsearch-from-zero.html`：DeepSearch 轨迹、SFT 与 RL 拆解
 - `posts/agent-harness-multimodal-search.html`：多模态 DeepSearch 训练路线调研

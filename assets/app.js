@@ -44,6 +44,39 @@
     if (event.key === 'Escape') closeMenu();
   });
 
+  const searchForm = document.querySelector('[data-site-search]');
+  const searchInput = searchForm?.querySelector('input[type="search"]');
+  const searchItems = [...document.querySelectorAll('[data-search-item]')];
+  const searchStatus = document.querySelector('[data-search-status]');
+
+  const filterPosts = () => {
+    if (!searchInput) return;
+    const query = searchInput.value.trim().toLocaleLowerCase('zh-CN');
+    let matches = 0;
+    searchItems.forEach(item => {
+      const matched = !query || item.textContent.toLocaleLowerCase('zh-CN').includes(query);
+      item.hidden = !matched;
+      if (matched) matches += 1;
+    });
+    if (searchStatus) {
+      searchStatus.textContent = query
+        ? `关键词“${searchInput.value.trim()}”找到 ${matches} 项`
+        : '';
+    }
+  };
+
+  searchForm?.addEventListener('submit', event => {
+    event.preventDefault();
+    filterPosts();
+  });
+  searchInput?.addEventListener('search', filterPosts);
+  searchInput?.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      searchInput.value = '';
+      filterPosts();
+    }
+  });
+
   const progress = document.querySelector('.progress');
   const updateProgress = () => {
     if (!progress) return;

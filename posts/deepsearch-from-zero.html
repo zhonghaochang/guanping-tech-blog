@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>一条 DeepSearch 轨迹是怎样训练出来的？｜changzhonghao</title>
   <meta name="description" content="从运行时消息、SFT loss mask 到 RL rollout，逐层拆开一个搜索 Agent 的训练样本。" />
-  <meta name="theme-color" content="#ffffff" />
+  <meta name="theme-color" content="#f4f3d9" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/deepsearch-from-zero.html" />
   <meta property="og:locale" content="zh_CN" />
   <meta property="og:type" content="article" />
@@ -16,26 +16,27 @@
   <meta property="article:published_time" content="2026-07-12" />
   <meta name="twitter:card" content="summary" />
   <link rel="icon" href="../assets/favicon.svg" />
-  <link rel="stylesheet" href="../assets/styles.css" />
+  <link rel="stylesheet" href="../assets/styles.css?v=3" />
 </head>
 <body>
   <div class="progress"></div>
   <header class="site-header">
     <nav class="nav" aria-label="主导航">
-      <a class="brand" href="../index.html"><span class="brand-mark">C</span><span>changzhonghao</span><span class="brand-note">Technical Blog</span></a>
+      <a class="brand" href="../index.html"><span class="brand-mark">C</span><span>changzhonghao 的技术博客</span><span class="brand-note">关于模型、搜索与训练</span></a>
       <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
-      <div class="nav-links" id="site-navigation"><a href="../index.html">文章</a><a href="../about.html">关于</a><button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button></div>
+      <div class="nav-links" id="site-navigation"><a href="../index.html">首页</a><a href="../archives.html">归档</a><a href="../about.html">关于</a><button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button></div>
     </nav>
   </header>
 
   <main class="article-shell">
     <header class="article-masthead">
-      <div class="article-side-meta"><strong>changzhonghao</strong>2026-07-12 · 约 24 分钟</div>
+      <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a> » DeepSearch</p>
       <div class="article-headline">
         <div class="article-kicker">DeepSearch · SFT · Agentic RL</div>
         <h1>一条 DeepSearch 轨迹是怎样训练出来的？</h1>
         <p class="article-deck">从运行时消息、SFT loss mask 到 RL rollout，逐层拆开一个搜索 Agent 的样本。重点不是“调用搜索 API”，而是模型、工具环境和训练目标怎样共同塑造一次搜索。</p>
       </div>
+      <div class="article-side-meta"><strong>changzhonghao</strong>2026 年 7 月 12 日 · 约 24 分钟</div>
     </header>
 
     <div class="article-layout">
@@ -305,6 +306,6 @@ def fatal_prefix_advantage(raw_advantage, is_fatal):
   </main>
 
   <footer class="footer"><div class="footer-inner"><span>© 2026 changzhonghao</span><span>DeepSearch · SFT · Agentic RL</span><a href="agent-harness-multimodal-search.html">下一篇：多模态训练路线 →</a></div></footer>
-  <script src="../assets/app.js?v=2"></script>
+  <script src="../assets/app.js?v=3"></script>
 </body>
 </html>

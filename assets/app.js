@@ -1,21 +1,23 @@
-
 (() => {
   const root = document.documentElement;
   const themeButton = document.querySelector('[data-theme-toggle]');
-  const saved = localStorage.getItem('theme');
-  if (saved) root.dataset.theme = saved;
+  const savedTheme = localStorage.getItem('theme');
+
+  if (savedTheme) root.dataset.theme = savedTheme;
   else if (window.matchMedia('(prefers-color-scheme: dark)').matches) root.dataset.theme = 'dark';
 
-  const setLabel = () => {
+  const setThemeLabel = () => {
     if (!themeButton) return;
-    themeButton.textContent = root.dataset.theme === 'dark' ? '☀' : '◐';
-    themeButton.setAttribute('aria-label', root.dataset.theme === 'dark' ? '切换到浅色模式' : '切换到深色模式');
+    const dark = root.dataset.theme === 'dark';
+    themeButton.textContent = dark ? '☀' : '◐';
+    themeButton.setAttribute('aria-label', dark ? '切换到浅色模式' : '切换到深色模式');
   };
-  setLabel();
+
+  setThemeLabel();
   themeButton?.addEventListener('click', () => {
     root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
     localStorage.setItem('theme', root.dataset.theme);
-    setLabel();
+    setThemeLabel();
   });
 
   const menuButton = document.querySelector('[data-menu-toggle]');
@@ -26,14 +28,15 @@
     menuButton.setAttribute('aria-expanded', 'false');
     menuButton.setAttribute('aria-label', '打开导航');
   };
+
   menuButton?.addEventListener('click', () => {
     if (!navigation) return;
-    const isOpen = navigation.classList.toggle('open');
-    menuButton.setAttribute('aria-expanded', String(isOpen));
-    menuButton.setAttribute('aria-label', isOpen ? '关闭导航' : '打开导航');
+    const open = navigation.classList.toggle('open');
+    menuButton.setAttribute('aria-expanded', String(open));
+    menuButton.setAttribute('aria-label', open ? '关闭导航' : '打开导航');
   });
   navigation?.querySelectorAll('a').forEach(link => link.addEventListener('click', closeMenu));
-  document.addEventListener('click', (event) => {
+  document.addEventListener('click', event => {
     if (!navigation?.classList.contains('open')) return;
     if (!navigation.contains(event.target) && !menuButton?.contains(event.target)) closeMenu();
   });
@@ -45,34 +48,43 @@
   const updateProgress = () => {
     if (!progress) return;
     const max = document.documentElement.scrollHeight - window.innerHeight;
-    progress.style.width = max > 0 ? `${(window.scrollY / max) * 100}%` : '0%';
+    progress.style.width = max > 0 ? `${Math.min(100, (window.scrollY / max) * 100)}%` : '0%';
   };
   updateProgress();
   addEventListener('scroll', updateProgress, { passive: true });
 
-  document.querySelectorAll('pre').forEach((pre) => {
-    const btn = document.createElement('button');
-    btn.className = 'copy-btn';
-    btn.textContent = '复制';
-    btn.addEventListener('click', async () => {
-      const code = pre.querySelector('code')?.innerText || pre.innerText.replace(/^复制\n/, '');
-      await navigator.clipboard.writeText(code);
-      btn.textContent = '已复制';
-      setTimeout(() => btn.textContent = '复制', 1100);
+  document.querySelectorAll('.code-frame').forEach(frame => {
+    const pre = frame.querySelector('pre');
+    const head = frame.querySelector('.code-head');
+    if (!pre || !head) return;
+
+    const button = document.createElement('button');
+    button.className = 'copy-btn';
+    button.type = 'button';
+    button.textContent = 'Copy';
+    button.setAttribute('aria-label', '复制代码');
+    button.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(pre.innerText);
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = 'Copy'; }, 1200);
     });
-    pre.appendChild(btn);
+    head.appendChild(button);
   });
 
   const tocLinks = [...document.querySelectorAll('.toc a')];
-  const headings = tocLinks.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+  const headings = tocLinks
+    .map(link => document.querySelector(link.getAttribute('href')))
+    .filter(Boolean);
+
   if (headings.length) {
-    const observer = new IntersectionObserver((entries) => {
+    const observer = new IntersectionObserver(entries => {
       entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          tocLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === `#${entry.target.id}`));
-        }
+        if (!entry.isIntersecting) return;
+        tocLinks.forEach(link => {
+          link.classList.toggle('active', link.getAttribute('href') === `#${entry.target.id}`);
+        });
       });
-    }, { rootMargin: '-18% 0px -70% 0px' });
-    headings.forEach(h => observer.observe(h));
+    }, { rootMargin: '-18% 0px -72% 0px' });
+    headings.forEach(heading => observer.observe(heading));
   }
 })();

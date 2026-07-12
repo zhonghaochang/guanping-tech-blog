@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepSearch 到底在“深”什么？从工具调用到搜索循环</title>
+  <meta name="description" content="用一份可运行的 Python 骨架解释 DeepSearch 的 action、observation、停止条件、证据压缩与失败重试。" />
+  <meta name="theme-color" content="#f7f6f2" />
+  <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/deepsearch-from-zero.html" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="Guanping's Research Notes" />
+  <meta property="og:title" content="DeepSearch 到底在“深”什么？" />
+  <meta property="og:description" content="从一次工具调用写到完整搜索循环。" />
+  <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/deepsearch-from-zero.html" />
+  <meta property="og:image" content="https://zhonghaochang.github.io/guanping-tech-blog/assets/og-editorial.png" />
+  <meta property="og:image:alt" content="Guanping's Research Notes — DeepSearch, Multimodal Agents, Post-training" />
+  <meta property="article:published_time" content="2026-07-12" />
+  <meta property="og:image:width" content="1731" />
+  <meta property="og:image:height" content="909" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" href="../assets/favicon.svg" />
+  <link rel="stylesheet" href="../assets/styles.css" />
+</head>
+<body>
+  <div class="progress"></div>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="../index.html"><span class="brand-mark">G</span><span>Guanping's Research Notes</span><span class="brand-note">DeepSearch / Post-training</span></a>
+      <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
+      <div class="nav-links" id="site-navigation">
+        <a aria-current="page" href="../index.html#writing">Writing</a>
+        <a href="../index.html#research">Research</a>
+        <a href="../about.html">About</a>
+        <button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button>
+      </div>
+    </nav>
+  </header>
+
+  <main class="article-shell">
+    <header class="article-masthead">
+      <div class="article-side-meta">
+        <strong>Essay 01</strong>
+        Concept &amp; Code<br />
+        2026-07-12<br />
+        约 18 分钟
+      </div>
+      <div class="article-headline">
+        <div class="article-kicker">DeepSearch · Harness · Python</div>
+        <h1>DeepSearch 到底在“深”什么？</h1>
+        <p class="article-deck">答案不在某个神秘的 <code>&lt;search&gt;</code> token 里。所谓 DeepSearch，是模型在不完整证据上反复做决定：搜什么、读什么、信什么，以及什么时候停。</p>
+      </div>
+    </header>
+
+    <div class="article-layout">
+      <aside class="toc" aria-label="文章目录">
+        <strong>Contents</strong>
+        <a href="#not-a-box">01 不是搜索框</a>
+        <a href="#loop">02 最小循环</a>
+        <a href="#messages">03 消息与停止</a>
+        <a href="#tools">04 工具适配</a>
+        <a href="#observation">05 证据回注</a>
+        <a href="#failure">06 失败状态</a>
+        <a href="#training">07 如何训练</a>
+        <a href="#skeleton">08 完整骨架</a>
+      </aside>
+
+      <article class="article">
+        <h2 id="not-a-box">01. DeepSearch 不是“更聪明的搜索框”</h2>
+        <p class="lead-drop">普通检索的输入和输出都很明确：给一个 query，返回一组文档。DeepSearch 多了一层控制。模型要根据当前证据决定下一步动作，环境执行动作，再把结果放回上下文。这个过程可能重复十几次。</p>
+        <p>因此，系统真正的状态不是一段 prompt，而是下面这组东西的合集：</p>
+        <ul>
+          <li>用户问题与原始图片；</li>
+          <li>模型已经产生的推理与工具动作；</li>
+          <li>每次搜索返回的候选、正文和失败信息；</li>
+          <li>剩余工具预算、上下文长度和停止条件。</li>
+        </ul>
+
+        <div class="loop-grid" aria-label="DeepSearch 控制循环">
+          <div class="loop-step"><span>01</span><strong>Model</strong><br />提出下一步动作</div>
+          <div class="loop-step"><span>02</span><strong>Parser</strong><br />校验结构与参数</div>
+          <div class="loop-step"><span>03</span><strong>Tool</strong><br />执行搜索或访问</div>
+          <div class="loop-step"><span>04</span><strong>Observation</strong><br />清洗并压缩证据</div>
+          <div class="loop-step"><span>05</span><strong>Policy</strong><br />继续、改写或停止</div>
+        </div>
+
+        <div class="claim"><strong>一个实用判断：</strong>如果代码里只有一次 `search(query)`，那是检索增强；如果模型能看完结果后重新决定动作，才开始接近 DeepSearch。</div>
+
+        <h2 id="loop">02. 先写出最小循环</h2>
+        <p>下面的代码没有框架依赖。<code>model.generate</code> 和 <code>tools.execute</code> 可以换成任意模型服务和搜索实现。关键不是 API，而是控制权在谁手里。</p>
+
+        <div class="code-frame">
+          <div class="code-head"><span><span class="code-file">agent_loop.py</span> · Python</span></div>
+          <pre><code>def run_agent(question, model, tools, max_turns=8):
+    messages = [{"role": "user", "content": question}]
+    trace = []
+
+    for turn in range(max_turns):
+        raw = model.generate(messages)
+        action = parse_action(raw)
+        trace.append({"turn": turn, "raw": raw, "action": action})
+
+        if action["type"] == "answer":
+            return {
+                "answer": action["content"],
+                "trace": trace,
+                "status": "answered",
+            }
+
+        observation = tools.execute(
+            name=action["name"],
+            arguments=action["arguments"],
+        )
+        messages.extend([
+            {"role": "assistant", "content": raw},
+            {"role": "tool", "content": normalize(observation)},
+        ])
+
+    return {"answer": None, "trace": trace, "status": "budget_exhausted"}</code></pre>
+        </div>
+
+        <p>这里有两个常被忽略的细节。其一，工具结果必须作为一条新消息加入，而不是拼到上一段 assistant 输出后面。其二，预算耗尽是一种明确状态，不能悄悄当成正常回答。</p>
+
+        <h2 id="messages">03. 模型何时停：EOS、stop string 与工具边界</h2>
+        <p>模型不会在看到 <code>&lt;/search&gt;</code> 时自动调用浏览器。它只是在生成 token。真正让生成暂停的是推理引擎或外层 Harness。</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>机制</th><th>由谁识别</th><th>适合做什么</th><th>常见误区</th></tr></thead>
+            <tbody>
+              <tr><td>EOS / <code>&lt;|im_end|&gt;</code></td><td>Tokenizer 与推理引擎</td><td>结束当前消息</td><td>把它误认为工具调用事件</td></tr>
+              <tr><td>Stop string</td><td>推理服务</td><td>遇到字符串提前截断</td><td>忘记返回文本可能不含 stop 串</td></tr>
+              <tr><td>结构化 tool call</td><td>SDK / Harness</td><td>解析函数名和 JSON 参数</td><td>只校验 JSON，不校验业务参数</td></tr>
+              <tr><td>自定义标签</td><td>自写 parser</td><td>训练和研究原型</td><td>标签闭合后仍继续生成废话</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>研究代码里常见的做法，是让模型每回合只能输出一个动作：工具调用，或最终答案。Parser 应当拒绝“既调用工具又给答案”的混合输出。</p>
+
+        <div class="code-frame">
+          <div class="code-head"><span><span class="code-file">protocol.py</span> · Python</span></div>
+          <pre><code>import json
+import re
+
+TOOL_RE = re.compile(r"&lt;tool_call&gt;(.*?)&lt;/tool_call&gt;", re.S)
+ANSWER_RE = re.compile(r"&lt;answer&gt;(.*?)&lt;/answer&gt;", re.S)
+
+def parse_action(text):
+    tool_match = TOOL_RE.search(text)
+    answer_match = ANSWER_RE.search(text)
+
+    if bool(tool_match) == bool(answer_match):
+        raise ValueError("one turn must contain exactly one action")
+
+    if answer_match:
+        return {"type": "answer", "content": answer_match.group(1).strip()}
+
+    payload = json.loads(tool_match.group(1))
+    if payload.get("name") not in {"text_search", "visit", "image_search"}:
+        raise ValueError(f"unknown tool: {payload.get('name')}")
+    return {
+        "type": "tool",
+        "name": payload["name"],
+        "arguments": payload.get("arguments", {}),
+    }</code></pre>
+        </div>
+
+        <h2 id="tools">04. 工具层不要直接暴露供应商响应</h2>
+        <p>搜索 API 的字段会变，网页抓取也会失败。模型不该理解每家供应商的原始 JSON。更稳妥的做法，是在工具层统一为少量稳定字段。</p>
+
+        <div class="code-frame">
+          <div class="code-head"><span><span class="code-file">tools/text_search.py</span> · Python</span></div>
+          <pre><code>from dataclasses import asdict, dataclass
+
+@dataclass
+class SearchHit:
+    rank: int
+    title: str
+    url: str
+    snippet: str
+    source: str
+
+def text_search(query, provider, top_k=5):
+    raw_hits = provider.search(query=query, limit=top_k)
+    hits = []
+
+    for rank, item in enumerate(raw_hits[:top_k], start=1):
+        hits.append(SearchHit(
+            rank=rank,
+            title=item.get("title", "").strip(),
+            url=item.get("url", ""),
+            snippet=clean_text(item.get("snippet", ""))[:600],
+            source=provider.name,
+        ))
+
+    return {
+        "ok": True,
+        "query": query,
+        "results": [asdict(hit) for hit in hits],
+    }</code></pre>
+        </div>
+
+        <p>这段适配层做了三件事：限制 Top-K，截断每条摘要，保留来源名称。后面换 SerpAPI、Bing 或离线索引时，上层轨迹格式不必跟着变。</p>
+
+        <h2 id="observation">05. Observation 不是“把网页全塞回去”</h2>
+        <p>一页正文可能有几万字。全量回注既浪费上下文，也会让导航、推荐阅读和版权声明稀释证据。Observation 应当围绕当前目标做压缩，同时保留可追溯的 URL。</p>
+
+        <div class="code-frame">
+          <div class="code-head"><span><span class="code-file">observation.py</span> · Python</span></div>
+          <pre><code>def build_observation(query, hits, char_budget=4200):
+    chunks = []
+    used = 0
+
+    for hit in hits:
+        block = (
+            f"[{hit['rank']}] {hit['title']}\n"
+            f"URL: {hit['url']}\n"
+            f"Evidence: {hit['snippet']}\n"
+        )
+        if used + len(block) &gt; char_budget:
+            break
+        chunks.append(block)
+        used += len(block)
+
+    return (
+        f"Search query: {query}\n"
+        f"Returned: {len(hits)} results\n\n"
+        + "\n".join(chunks)
+    )</code></pre>
+        </div>
+
+        <div class="note"><strong>工程上最好同时保存两份：</strong>给模型看的压缩 observation，以及用于审计的原始 API 响应。只存前者无法复盘信息损失；只存后者则很难复现模型当时到底看到了什么。</div>
+
+        <h2 id="failure">06. 失败不是异常分支，而是训练数据</h2>
+        <p>真实搜索最常见的不是“找不到答案”，而是工具半路坏掉：超时、页面 403、正文为空、图片 URL 过期、参数格式正确但语义无效。Harness 应当把失败转成结构化 observation，让模型有机会改写 query 或换工具。</p>
+
+        <div class="code-frame">
+          <div class="code-head"><span><span class="code-file">tools/base.py</span> · Python</span></div>
+          <pre><code>def safe_execute(tool, arguments):
+    try:
+        result = tool(**arguments)
+        if not result:
+            return {"ok": False, "error": "empty_result", "retryable": True}
+        return {"ok": True, "data": result}
+    except TimeoutError:
+        return {"ok": False, "error": "timeout", "retryable": True}
+    except PermissionError:
+        return {"ok": False, "error": "access_denied", "retryable": False}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": type(exc).__name__,
+            "retryable": False,
+        }</code></pre>
+        </div>
+
+        <p>不要把完整堆栈发给模型；那是日志，不是 observation。对策略有用的是失败类型、是否值得重试，以及本回合消耗了多少预算。</p>
+
+        <h2 id="training">07. Prompt、SFT 和 RL 分别解决什么</h2>
+        <p>Prompt 可以临时声明协议，但很难稳定长轨迹。SFT 主要解决格式、工具选择和 observation 利用；RL 才进一步优化什么时候搜、要不要继续，以及在预算内怎样取舍。</p>
+
+        <div class="metric-row">
+          <div class="metric"><strong>Prompt</strong><span>定义动作空间</span></div>
+          <div class="metric"><strong>SFT</strong><span>学会合法轨迹</span></div>
+          <div class="metric"><strong>RL</strong><span>优化搜索策略</span></div>
+        </div>
+
+        <p>做 SFT 时，通常只对模型产生的 token 计算 loss。用户问题与工具 observation 是条件，不是模型要背下来的答案。</p>
+
+        <div class="code-frame">
+          <div class="code-head"><span><span class="code-file">loss_mask.py</span> · Pseudocode</span></div>
+          <pre><code>user(question)             loss_mask = 0
+assistant(think + action)  loss_mask = 1
+tool(observation)          loss_mask = 0
+assistant(think + answer)  loss_mask = 1</code></pre>
+        </div>
+
+        <h2 id="skeleton">08. 把骨架补完整</h2>
+        <p>下面这份状态结构足够支撑一个小型实验。它没有包含并发搜索、图片存储和模型服务，但把后续训练真正需要的字段留了下来。</p>
+
+        <div class="code-frame">
+          <div class="code-head"><span><span class="code-file">state.py</span> · Python</span></div>
+          <pre><code>from dataclasses import dataclass, field
+from time import time
+
+@dataclass
+class AgentState:
+    question: str
+    messages: list[dict]
+    trace: list[dict] = field(default_factory=list)
+    tool_calls: int = 0
+    max_tool_calls: int = 12
+    started_at: float = field(default_factory=time)
+
+    def can_continue(self):
+        return self.tool_calls &lt; self.max_tool_calls
+
+    def record(self, *, raw, action, observation=None):
+        self.trace.append({
+            "step": len(self.trace),
+            "raw_model_output": raw,
+            "parsed_action": action,
+            "observation": observation,
+            "elapsed_ms": round((time() - self.started_at) * 1000),
+        })
+        if action["type"] == "tool":
+            self.tool_calls += 1</code></pre>
+        </div>
+
+        <div class="takeaway"><strong>到这里，DeepSearch 可以被一句话准确描述：</strong>模型负责提出动作，Harness 负责让动作发生，Observation 把现实世界带回上下文，预算与证据决定循环何时结束。</div>
+
+        <h2>继续阅读</h2>
+        <p>这篇只解决“系统怎么跑”。如果要研究模型如何学会这套行为，可以继续看<a href="agent-harness-multimodal-search.html">《多模态 DeepSearch 的训练路线：论文、协议、SFT 与 Agentic RL》</a>。</p>
+      </article>
+
+      <aside class="aside-card">
+        <strong>文章边界</strong>
+        <p>示例代码只依赖 Python 标准库，可作为 Harness 的最小骨架。搜索供应商与模型接口刻意留成依赖注入。</p>
+        <strong>建议实践</strong>
+        <p>先用离线 JSON 搜索结果跑通循环，再接真实 API。否则调协议和调网络问题会混在一起。</p>
+      </aside>
+    </div>
+  </main>
+
+  <footer class="footer"><div class="footer-inner"><span>© 2026 Guanping</span><span>Essay 01 · Concept &amp; Code</span><a href="../index.html">Back to index →</a></div></footer>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

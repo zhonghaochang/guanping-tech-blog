@@ -1,29 +1,60 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>关于｜Guanping's Research Notes</title>
-  <meta name="description" content="Guanping's Research Notes 的研究方向与博客定位。" />
-  <meta name="theme-color" content="#f5f4ef" />
+  <meta name="description" content="Guanping's Research Notes 的研究方向、写作原则与内容边界。" />
+  <meta name="theme-color" content="#f7f6f2" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/about.html" />
-  <meta property="og:locale" content="zh_CN" /><meta property="og:type" content="website" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Guanping's Research Notes" />
   <meta property="og:title" content="关于｜Guanping's Research Notes" />
-  <meta property="og:description" content="Guanping's Research Notes 的研究方向与博客定位。" />
+  <meta property="og:description" content="研究方向、写作原则与内容边界。" />
   <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/about.html" />
-  <meta name="twitter:card" content="summary" />
-  <link rel="icon" href="assets/favicon.svg" /><link rel="stylesheet" href="assets/styles.css" />
+  <meta property="og:image" content="https://zhonghaochang.github.io/guanping-tech-blog/assets/og-editorial.png" />
+  <meta property="og:image:alt" content="Guanping's Research Notes — DeepSearch, Multimodal Agents, Post-training" />
+  <meta property="og:image:width" content="1731" />
+  <meta property="og:image:height" content="909" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" href="assets/favicon.svg" />
+  <link rel="stylesheet" href="assets/styles.css" />
 </head>
 <body>
-<header class="site-header"><nav class="nav"><a class="brand" href="index.html"><span class="brand-mark">G</span><span>Guanping's Research Notes</span></a><button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button><div class="nav-links" id="site-navigation"><a href="index.html#articles">文章</a><a href="index.html#research">研究方向</a><a href="about.html">关于</a><button class="icon-button" data-theme-toggle>◐</button></div></nav></header>
-<main class="container hero">
-  <div class="eyebrow">About</div><h1>把研究问题拆到<br/><span class="accent">可验证的工程细节</span>。</h1>
-  <p>本站用于记录多模态搜索、Agent Search、DeepResearch 与 Agent 后训练方向的论文调研、代码分析和可复现实验设计。</p>
-  <section class="section about-grid">
-    <div class="card about-card"><h3>写作原则</h3><p>区分论文声称、代码事实与个人推断；对未公开配置明确标注；优先引用论文、项目页和官方代码仓库。</p></div>
-    <div class="card about-card"><h3>内容形态</h3><p>长文、项目对比表、工具调用轨迹、训练数据格式、Benchmark 环境配置和复现实验笔记。</p></div>
-  </section>
-</main>
-<footer class="footer"><div class="footer-inner"><span>© 2026 Guanping's Research Notes</span><a href="index.html">返回首页</a></div></footer>
-<script src="assets/app.js"></script>
-</body></html>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="index.html"><span class="brand-mark">G</span><span>Guanping's Research Notes</span><span class="brand-note">DeepSearch / Post-training</span></a>
+      <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
+      <div class="nav-links" id="site-navigation">
+        <a href="index.html#writing">Writing</a>
+        <a href="index.html#research">Research</a>
+        <a aria-current="page" href="about.html">About</a>
+        <button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button>
+      </div>
+    </nav>
+  </header>
+
+  <main class="about-page">
+    <div class="eyebrow">About / Editorial note</div>
+    <h1>把研究问题拆到可以验证的工程细节。</h1>
+    <p class="about-intro">这个博客记录多模态搜索、Agent Harness 与后训练相关的源码阅读、论文调研和复现实验。重点不是追逐术语，而是找到系统里真正影响结果的那一层。</p>
+
+    <div class="about-grid">
+      <section class="about-block">
+        <div class="section-kicker">01 / Writing rule</div>
+        <h2>事实、论文声称和个人判断分开写</h2>
+        <p>能从代码确认的就指到代码；只能从论文确认的就保留论文的限定语；没有公开配置的部分，不用肯定句补齐。</p>
+      </section>
+      <section class="about-block">
+        <div class="section-kicker">02 / Preferred form</div>
+        <h2>代码优先于流程图，失败案例优先于口号</h2>
+        <p>文章会尽量给出可执行骨架、消息格式、轨迹记录和评测配置。系统为什么失败，通常比成功截图更接近真实工作。</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer"><div class="footer-inner"><span>© 2026 Guanping</span><span>Independent research notes.</span><a href="index.html">Back to index →</a></div></footer>
+  <script src="assets/app.js"></script>
+</body>
+</html>

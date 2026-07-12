@@ -1,7 +1,7 @@
 {
   "name": "Guanping's Research Notes",
   "short_name": "Guanping Notes",
-  "description": "多模态搜索与 Agent 后训练研究笔记",
+  "description": "DeepSearch、多模态 Agent 与后训练研究笔记",
   "lang": "zh-CN",
   "start_url": "./",
   "display": "standalone",

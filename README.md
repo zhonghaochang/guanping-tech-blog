@@ -21,6 +21,7 @@ python -m http.server 8000
 
 - `index.html`：主页
 - `about.html`：关于页
-- `posts/agent-harness-multimodal-search.html`：首篇长文
+- `posts/deepsearch-from-zero.html`：DeepSearch 入门与工程实现
+- `posts/agent-harness-multimodal-search.html`：多模态 DeepSearch 文献调研
 - `assets/styles.css`：全站样式
 - `assets/app.js`：深色模式、阅读进度、代码复制和目录高亮

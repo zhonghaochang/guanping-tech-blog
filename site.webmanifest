@@ -1,12 +1,12 @@
 {
-  "name": "Guanping's Research Notes",
-  "short_name": "Guanping Notes",
+  "name": "changzhonghao 的技术博客",
+  "short_name": "changzhonghao",
   "description": "DeepSearch、多模态 Agent 与后训练研究笔记",
   "lang": "zh-CN",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#f5f4ef",
-  "theme_color": "#0b6b4d",
+  "background_color": "#ffffff",
+  "theme_color": "#175199",
   "icons": [
     {
       "src": "assets/favicon.svg",

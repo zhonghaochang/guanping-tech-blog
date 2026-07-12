@@ -3,21 +3,17 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Guanping's Research Notes｜DeepSearch 与 Agent 后训练</title>
-  <meta name="description" content="从搜索循环的工程实现，到多模态 DeepSearch 的论文、训练数据与强化学习配方。" />
-  <meta name="theme-color" content="#f7f6f2" />
+  <title>changzhonghao 的技术博客</title>
+  <meta name="description" content="记录 DeepSearch、多模态 Agent、后训练与工程复现。" />
+  <meta name="theme-color" content="#ffffff" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/" />
   <meta property="og:locale" content="zh_CN" />
   <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="Guanping's Research Notes" />
-  <meta property="og:title" content="Guanping's Research Notes｜DeepSearch 与 Agent 后训练" />
-  <meta property="og:description" content="把 DeepSearch 的搜索循环、工具协议、SFT 与 RL 讲到可以复现。" />
+  <meta property="og:site_name" content="changzhonghao 的技术博客" />
+  <meta property="og:title" content="changzhonghao 的技术博客" />
+  <meta property="og:description" content="记录 DeepSearch、多模态 Agent、后训练与工程复现。" />
   <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/" />
-  <meta property="og:image" content="https://zhonghaochang.github.io/guanping-tech-blog/assets/og-editorial.png" />
-  <meta property="og:image:alt" content="Guanping's Research Notes — DeepSearch, Multimodal Agents, Post-training" />
-  <meta property="og:image:width" content="1731" />
-  <meta property="og:image:height" content="909" />
-  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:card" content="summary" />
   <link rel="icon" href="assets/favicon.svg" />
   <link rel="manifest" href="site.webmanifest" />
   <link rel="stylesheet" href="assets/styles.css" />
@@ -25,104 +21,43 @@
 <body>
   <header class="site-header">
     <nav class="nav" aria-label="主导航">
-      <a class="brand" href="index.html">
-        <span class="brand-mark">G</span>
-        <span>Guanping's Research Notes</span>
-        <span class="brand-note">DeepSearch / Post-training</span>
-      </a>
+      <a class="brand" href="index.html"><span class="brand-mark">C</span><span>changzhonghao</span><span class="brand-note">Technical Blog</span></a>
       <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
       <div class="nav-links" id="site-navigation">
-        <a href="#writing">Writing</a>
-        <a href="#research">Research</a>
-        <a href="about.html">About</a>
+        <a aria-current="page" href="index.html">文章</a>
+        <a href="about.html">关于</a>
         <button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button>
       </div>
     </nav>
   </header>
 
-  <main>
-    <section class="home-hero">
-      <div class="hero-rail">
-        <div class="eyebrow">Independent research notes<br />Issue 001 · 2026</div>
-        <p>关注多模态检索、Agent Harness、训练轨迹与可复现评测。写清楚系统如何工作，也记录哪些地方仍然没有答案。</p>
-      </div>
-      <div class="hero-copy">
-        <h1>Search is not a feature.<br />It is a <em>loop.</em></h1>
-        <p class="hero-deck">搜索不是模型额外拥有的一项“能力”，而是一段由模型、工具和环境共同完成的控制循环。这里从代码出发，再回到论文。</p>
-        <div class="hero-actions">
-          <a class="btn primary" href="posts/deepsearch-from-zero.html">先读 DeepSearch 入门 <span>→</span></a>
-          <a class="btn" href="posts/agent-harness-multimodal-search.html">查看文献调研 <span>↗</span></a>
-        </div>
-      </div>
-    </section>
+  <main class="blog-home">
+    <header class="blog-intro">
+      <h1>changzhonghao</h1>
+      <p>记录 DeepSearch、多模态 Agent、后训练与工程复现。</p>
+    </header>
 
-    <div class="issue-strip">
-      <span><strong>Current focus</strong> · Multimodal search agents</span>
-      <span>Source-first · Code-backed · Reproducible</span>
-      <span>Last updated · 2026-07-12</span>
-    </div>
-
-    <section class="section-wrap" id="writing">
-      <div class="section-head">
-        <div class="section-kicker">01 / Writing</div>
-        <h2>两条阅读路径：先把循环跑起来，再讨论怎样把它训练出来。</h2>
-      </div>
-
-      <div class="article-list">
-        <a class="article-row" href="posts/deepsearch-from-zero.html">
-          <div class="article-no"><strong>01</strong><span>Concept &amp; Code</span></div>
-          <div>
-            <h3>DeepSearch 到底在“深”什么？从一次工具调用写到完整搜索循环</h3>
-            <p>面向第一次接触搜索 Agent 的读者。用一份可运行的 Python 骨架解释 action、observation、stop condition、证据压缩和失败重试。</p>
-          </div>
-          <div class="article-tags">DeepSearch<br />Harness<br />Python<br />18 min</div>
-          <div class="article-arrow" aria-hidden="true">→</div>
-        </a>
-
-        <a class="article-row" href="posts/agent-harness-multimodal-search.html">
-          <div class="article-no"><strong>02</strong><span>Literature Review</span></div>
-          <div>
-            <h3>多模态 DeepSearch 的训练路线：论文、协议、SFT 与 Agentic RL</h3>
-            <p>聚焦 2025—2026 年代表工作。比较 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 与 OpenSearch-VL 的工具空间、冷启动和奖励设计。</p>
-          </div>
-          <div class="article-tags">Papers<br />Multimodal<br />SFT / RL<br />25 min</div>
-          <div class="article-arrow" aria-hidden="true">→</div>
-        </a>
-      </div>
-    </section>
-
-    <section class="section-wrap" id="research">
-      <div class="section-head">
-        <div class="section-kicker">02 / Research map</div>
-        <h2>目前真正值得盯住的，不是标签格式，而是环境与数据。</h2>
-      </div>
-      <div class="topic-grid">
-        <article class="topic">
-          <span class="topic-no">A / Environment</span>
-          <h3>搜索环境如何保持可复现</h3>
-          <p>固定 Top-K、Reader、地区、缓存和超时策略。否则奖励变化可能来自搜索结果漂移，而不是策略变好。</p>
+    <section aria-labelledby="posts-title">
+      <div class="posts-heading"><h2 id="posts-title">文章</h2><span>按更新时间排序</span></div>
+      <div class="post-list">
+        <article class="post-item">
+          <div class="post-meta"><time datetime="2026-07-12">2026-07-12</time><span>DeepSearch · SFT · RL</span></div>
+          <h2><a href="posts/deepsearch-from-zero.html">一条 DeepSearch 轨迹是怎样训练出来的？</a></h2>
+          <p>逐轮拆开 action、observation 与 Harness，再比较 SFT 样本、loss mask、RL rollout 和奖励是怎样组织的。</p>
+          <a class="post-link" href="posts/deepsearch-from-zero.html">阅读全文 →</a>
         </article>
-        <article class="topic">
-          <span class="topic-no">B / Trajectory</span>
-          <h3>什么轨迹值得拿去训练</h3>
-          <p>同时保存原始动作、API 响应、标准化 observation 与失败状态，才能追踪模型到底学到了什么。</p>
-        </article>
-        <article class="topic">
-          <span class="topic-no">C / Evaluation</span>
-          <h3>答案正确不等于搜得正确</h3>
-          <p>把最终答案、证据覆盖、工具成本与来源质量拆开评分，避免模型靠记忆或偶然命中绕过搜索。</p>
+
+        <article class="post-item">
+          <div class="post-meta"><time datetime="2026-07-12">2026-07-12</time><span>Multimodal · Literature Review</span></div>
+          <h2><a href="posts/agent-harness-multimodal-search.html">多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness</a></h2>
+          <p>对照 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 与 OpenSearch-VL，核对样本量、训练设置、工具环境和长轨迹处理。</p>
+          <a class="post-link" href="posts/agent-harness-multimodal-search.html">阅读全文 →</a>
         </article>
       </div>
     </section>
   </main>
 
-  <footer class="footer">
-    <div class="footer-inner">
-      <span>© 2026 Guanping</span>
-      <span>Research notes on DeepSearch, multimodal agents and post-training.</span>
-      <a href="about.html">About this site →</a>
-    </div>
-  </footer>
-  <script src="assets/app.js"></script>
+  <footer class="footer"><div class="footer-inner"><span>© 2026 changzhonghao</span><span>DeepSearch · Multimodal Agents · Post-training</span><a href="about.html">关于 →</a></div></footer>
+  <script src="assets/app.js?v=2"></script>
 </body>
 </html>

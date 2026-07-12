@@ -58,17 +58,17 @@
     const head = frame.querySelector('.code-head');
     if (!pre || !head) return;
 
-    const button = document.createElement('button');
+    const button = head.querySelector('.copy-btn') || document.createElement('button');
     button.className = 'copy-btn';
     button.type = 'button';
-    button.textContent = 'Copy';
+    button.textContent = '复制';
     button.setAttribute('aria-label', '复制代码');
     button.addEventListener('click', async () => {
       await navigator.clipboard.writeText(pre.innerText);
-      button.textContent = 'Copied';
-      setTimeout(() => { button.textContent = 'Copy'; }, 1200);
+      button.textContent = '已复制';
+      setTimeout(() => { button.textContent = '复制'; }, 1200);
     });
-    head.appendChild(button);
+    if (!button.parentElement) head.appendChild(button);
   });
 
   const tocLinks = [...document.querySelectorAll('.toc a')];

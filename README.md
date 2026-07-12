@@ -1,4 +1,4 @@
-# Guanping's Research Notes
+# changzhonghao 的技术博客
 
 一个无需构建工具的静态个人技术博客。
 
@@ -21,7 +21,7 @@ python -m http.server 8000
 
 - `index.html`：主页
 - `about.html`：关于页
-- `posts/deepsearch-from-zero.html`：DeepSearch 入门与工程实现
-- `posts/agent-harness-multimodal-search.html`：多模态 DeepSearch 文献调研
+- `posts/deepsearch-from-zero.html`：DeepSearch 轨迹、SFT 与 RL 拆解
+- `posts/agent-harness-multimodal-search.html`：多模态 DeepSearch 训练路线调研
 - `assets/styles.css`：全站样式
 - `assets/app.js`：深色模式、阅读进度、代码复制和目录高亮

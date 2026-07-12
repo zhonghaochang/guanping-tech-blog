@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Guanping's Research Notes｜多模态搜索与 Agent 后训练</title>
+  <meta name="description" content="聚焦多模态搜索、DeepSearch、DeepResearch、Agent Harness、SFT 与强化学习的个人技术博客。" />
+  <meta name="theme-color" content="#f5f4ef" />
+  <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Guanping's Research Notes" />
+  <meta property="og:title" content="Guanping's Research Notes｜多模态搜索与 Agent 后训练" />
+  <meta property="og:description" content="聚焦多模态搜索、DeepSearch、DeepResearch、Agent Harness、SFT 与强化学习的个人技术博客。" />
+  <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/" />
+  <meta name="twitter:card" content="summary" />
+  <link rel="icon" href="assets/favicon.svg" />
+  <link rel="manifest" href="site.webmanifest" />
+  <link rel="stylesheet" href="assets/styles.css" />
+</head>
+<body>
+  <div class="progress"></div>
+  <header class="site-header">
+    <nav class="nav">
+      <a class="brand" href="index.html"><span class="brand-mark">G</span><span>Guanping's Research Notes</span></a>
+      <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
+      <div class="nav-links" id="site-navigation">
+        <a href="#articles">文章</a><a href="#research">研究方向</a><a href="about.html">关于</a>
+        <button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero container">
+      <div class="eyebrow">Multimodal Search · Agent Post-training</div>
+      <h1>把复杂的 <span class="accent">Agent 搜索</span><br/>讲到能复现、能训练。</h1>
+      <p>记录多模态 DeepSearch / DeepResearch、Agent Harness、工具调用、数据构造、SFT 与强化学习中的关键机制与工程细节。</p>
+      <div class="hero-actions">
+        <a class="btn primary" href="posts/agent-harness-multimodal-search.html">阅读最新长文 →</a>
+        <a class="btn" href="#research">查看研究主题</a>
+      </div>
+    </section>
+
+    <section class="section container" id="articles">
+      <div class="section-title"><div><div class="eyebrow">Featured</div><h2>精选文章</h2></div><p>从概念梳理到训练实现</p></div>
+      <div class="grid">
+        <article class="card feature-card">
+          <div>
+            <div class="card-kicker">Agent Harness · 2026-07-12</div>
+            <h3>从 &lt;search&gt; 到真实 API：多模态搜索 Agent 如何停下来、调用工具并继续推理</h3>
+            <p>结合 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch、OpenSearch-VL、VSearcher、SimpleSearch-VL、InterLV-Search 与 BrowseComp-V3，解释 token、EOS、工具协议、SFT 和 RL 的完整链路。</p>
+            <div class="tag-row"><span class="tag">DeepSearch</span><span class="tag">Tool Calling</span><span class="tag">SFT</span><span class="tag">RL</span></div>
+          </div>
+          <a class="btn primary" href="posts/agent-harness-multimodal-search.html">进入文章 →</a>
+        </article>
+        <aside class="card side-card">
+          <div class="card-kicker">Research Map</div>
+          <h3>当前关注</h3>
+          <div class="mini-list">
+            <div class="mini-item"><strong>多模态 Agent 搜索</strong><span class="meta">图像检索、网页浏览、局部裁剪与证据验证</span></div>
+            <div class="mini-item"><strong>Agent 后训练</strong><span class="meta">轨迹合成、冷启动 SFT、在线/离线 RL</span></div>
+            <div class="mini-item"><strong>Benchmark 设计</strong><span class="meta">多信源冲突、噪声、过程评分和可复现环境</span></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section container" id="research">
+      <div class="section-title"><div><div class="eyebrow">Topics</div><h2>研究主题</h2></div></div>
+      <div class="about-grid">
+        <div class="card about-card"><div class="card-kicker">01</div><h3>多模态 DeepSearch</h3><p>研究文本搜索、图片搜索、Lens、网页 Reader、局部视觉查询以及多轮证据聚合。</p></div>
+        <div class="card about-card"><div class="card-kicker">02</div><h3>DeepResearch Agent</h3><p>关注长程规划、来源验证、上下文压缩、研究记忆与结构化报告生成。</p></div>
+        <div class="card about-card"><div class="card-kicker">03</div><h3>SFT 与强化学习</h3><p>分析工具轨迹如何进入监督学习，以及环境 observation、action mask 和结果奖励如何组成 RL rollout。</p></div>
+        <div class="card about-card"><div class="card-kicker">04</div><h3>可信评测环境</h3><p>固定搜索 API、Reader、Top-K、调用预算、缓存、地区和工具失败策略，让实验结果可解释。</p></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer"><div class="footer-inner"><span>© 2026 Guanping's Research Notes</span><span>Built for reproducible AI-search research.</span></div></footer>
+  <script src="assets/app.js"></script>
+</body>
+</html>

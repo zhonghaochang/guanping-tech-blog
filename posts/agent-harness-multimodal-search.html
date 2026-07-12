@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>从 search 到真实 API：多模态搜索 Agent 的 Harness、SFT 与 RL</title>
+  <meta name="description" content="系统解释多模态搜索 Agent 如何从模型输出标签触发搜索 API，如何使用 Agent Harness、EOS、tool call、SFT 与强化学习。" />
+  <meta property="og:title" content="从 <search> 到真实 API：多模态搜索 Agent 的 Harness、SFT 与 RL" />
+  <meta property="og:type" content="article" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:site_name" content="Guanping's Research Notes" />
+  <meta property="og:description" content="系统解释多模态搜索 Agent 如何触发搜索 API，以及 Agent Harness、EOS、tool call、SFT 与强化学习。" />
+  <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/agent-harness-multimodal-search.html" />
+  <meta property="article:published_time" content="2026-07-12" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="theme-color" content="#f5f4ef" />
+  <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/agent-harness-multimodal-search.html" />
+  <link rel="icon" href="../assets/favicon.svg" />
+  <link rel="stylesheet" href="../assets/styles.css" />
+</head>
+<body>
+<div class="progress"></div>
+<header class="site-header"><nav class="nav"><a class="brand" href="../index.html"><span class="brand-mark">G</span><span>Guanping's Research Notes</span></a><button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button><div class="nav-links" id="site-navigation"><a href="../index.html#articles">文章</a><a href="../index.html#research">研究方向</a><a href="../about.html">关于</a><button class="icon-button" data-theme-toggle>◐</button></div></nav></header>
+
+<main class="article-shell">
+  <header class="article-head">
+    <div class="eyebrow">Agent Harness · Tool Calling · Post-training</div>
+    <h1>从 &lt;search&gt; 到真实 API：多模态搜索 Agent 如何停下来、调用工具并继续推理</h1>
+    <p class="lead">结合 2025—2026 年代表性多模态搜索与 DeepResearch 项目，拆解模型 token、消息结束、工具解析、搜索 API、Observation 回注，以及 Prompt、SFT 和 RL 分别承担什么作用。</p>
+    <div class="article-meta"><span>2026 年 7 月 12 日</span><span>·</span><span>约 25 分钟阅读</span><span>·</span><span>多模态 Agent 搜索</span></div>
+  </header>
+
+  <div class="article-layout">
+    <aside class="toc">
+      <strong>目录</strong>
+      <a href="#mental-model">1. 核心心智模型</a>
+      <a href="#pause">2. 模型何时停</a>
+      <a href="#harness">3. Harness 四层结构</a>
+      <a href="#protocols">4. 四类工具协议</a>
+      <a href="#trace">5. 完整搜索轨迹</a>
+      <a href="#projects">6. 十二个项目对比</a>
+      <a href="#learning">7. Prompt / SFT / RL</a>
+      <a href="#sft">8. SFT 数据格式</a>
+      <a href="#rl">9. RL Rollout</a>
+      <a href="#recommendation">10. 实现建议</a>
+    </aside>
+
+    <article class="article">
+      <div class="takeaway"><strong>一句话结论：</strong>模型本身通常不直接访问搜索引擎。它生成一个结构化动作；Agent Harness 解析动作、调用 API、整理结果，再把结果作为新消息送回模型，开启下一轮推理。</div>
+
+      <h2 id="mental-model">1. 核心心智模型：模型输出动作，环境执行动作</h2>
+      <p>看到下面的输出时，很多人会误以为模型内部“自动联网”了：</p>
+<pre><code>&lt;think&gt;
+需要先根据球衣、人物和背景识别战队。
+&lt;/think&gt;
+&lt;search&gt;&lt;img&gt;&lt;/search&gt;</code></pre>
+      <p>实际上，这段内容首先只是模型生成的一串 token。真正使它产生搜索效果的是外部程序中的映射规则：</p>
+<pre><code>if parse_action(model_output) == "image_search":
+    result = image_search_api(original_image)
+    messages.append(tool_observation(result))</code></pre>
+      <div class="flow">
+        <div class="flow-step">模型生成动作</div><div class="flow-step">解析器识别</div><div class="flow-step">工具执行 API</div><div class="flow-step">结果转为 Observation</div><div class="flow-step">下一轮模型推理</div>
+      </div>
+      <p>因此，工具能力由两部分共同构成：</p>
+      <ul><li><strong>模型：</strong>决定什么时候调用什么工具，并生成参数；</li><li><strong>Harness：</strong>解释动作、执行工具、控制预算、把结果回注上下文。</li></ul>
+      <div class="note">没有 Harness，即使模型完美输出 <code>&lt;search&gt;</code>，也只会得到一段普通文字，不会产生 HTTP 请求。</div>
+
+      <h2 id="pause">2. 生成到 <code>&lt;/search&gt;</code> 时，会立刻暂停吗？</h2>
+      <p>答案是：<strong>不一定</strong>。实际存在两种实现。</p>
+      <h3>2.1 完整生成当前 assistant 回合，再解析</h3>
+      <p><strong>MMSearch-R1</strong> 的公开 rollout 更接近这种方式：推理引擎先生成完整回答，通常直到 <code>&lt;|im_end|&gt;</code> 或 EOS；随后 Harness 解码整段字符串，用正则检查输出末尾是否含有图片搜索或文本搜索标签，再执行工具。</p>
+<pre><code>&lt;|im_start|&gt;assistant
+&lt;think&gt;需要先识别图片。&lt;/think&gt;
+&lt;search&gt;&lt;img&gt;&lt;/search&gt;
+&lt;|im_end|&gt;</code></pre>
+      <p>这时流程是：</p>
+      <ol><li>模型生成当前消息；</li><li>模型生成 <code>&lt;|im_end|&gt;</code> 或 EOS，当前调用结束；</li><li>Harness 检查搜索标签；</li><li>执行图片搜索；</li><li>把结果包装成新的用户消息或工具消息；</li><li>再次调用模型。</li></ol>
+
+      <h3>2.2 检测到闭合标签后，提前停止解码</h3>
+      <p>另一类系统把 <code>&lt;/tool_call&gt;</code> 配置为停止字符串，或者在流式生成时实时检测闭合标签。一旦完整工具调用产生，就中断本轮解码并执行工具。</p>
+<pre><code>stop_strings = ["&lt;/tool_call&gt;", "&lt;/answer&gt;"]
+
+if stream_buffer.endswith("&lt;/tool_call&gt;"):
+    abort_current_generation()
+    execute_tool()</code></pre>
+      <p><strong>OpenSearch-VL</strong> 的训练系统明确支持工具调用的中断与后续轨迹恢复，并规定每轮仅输出一个 <code>&lt;tool_call&gt;</code> 或最终 <code>&lt;response&gt;</code>。</p>
+
+      <h3>2.3 <code>&lt;|im_end|&gt;</code>、EOS 与 stop string 的区别</h3>
+      <div class="table-wrap"><table><thead><tr><th>概念</th><th>含义</th><th>由谁定义/执行</th></tr></thead><tbody>
+        <tr><td><code>&lt;|im_end|&gt;</code></td><td>当前 ChatML 消息结束</td><td>Tokenizer 与聊天模板定义；模型学习何时生成</td></tr>
+        <tr><td>EOS</td><td>当前生成序列结束</td><td>Tokenizer 提供 token ID，推理引擎看到后停止</td></tr>
+        <tr><td>stop string</td><td>人为指定的文本停止条件</td><td>Harness / 推理引擎配置</td></tr>
+      </tbody></table></div>
+      <p><code>&lt;/search&gt;</code> 也不一定是一个 tokenizer token。它可能被切成 <code>&lt;</code>、<code>/</code>、<code>search</code>、<code>&gt;</code> 等多个 token。多数 Harness 是先解码成字符串，再进行正则或 JSON/XML 解析。</p>
+
+      <h2 id="harness">3. Agent Harness 的四层结构</h2>
+      <h3>3.1 模型与 Prompt 层</h3>
+      <p>系统提示词声明工具名称、参数 Schema、输出格式、每轮最大动作数和最终答案格式。强指令模型可以凭零样本或少样本提示，临时遵循新的工具协议。</p>
+      <h3>3.2 动作解析层</h3>
+      <p>负责把模型输出转换成结构化动作：</p>
+<pre><code>Action(
+    name="text_search",
+    arguments={"query": ["NAVI first Major championship year"]}
+)</code></pre>
+      <p>解析失败时，Harness 还需要决定：让模型重试、返回格式错误、终止轨迹，还是自动修复 JSON。</p>
+      <h3>3.3 工具执行层</h3>
+      <p>这一层保存 SerpAPI、Serper、Jina Reader 等密钥，真正发起 HTTP 请求。API Key 不应出现在模型上下文中。</p>
+      <h3>3.4 Observation 与状态管理层</h3>
+      <p>搜索结果不会原封不动地无限加入上下文。Harness 通常会执行 Top-K 截断、去重、网页 Reader、摘要、图片下载、图片句柄注册、搜索预算统计和运行记忆压缩。</p>
+
+      <h2 id="protocols">4. 2025—2026 年项目中的四类工具协议</h2>
+      <h3>4.1 工具专属标签</h3>
+<pre><code>&lt;search&gt;&lt;img&gt;&lt;/search&gt;
+&lt;text_search&gt;NAVI first Major title year&lt;/text_search&gt;</code></pre>
+      <p>代表项目是 <strong>MMSearch-R1</strong>。优点是简单、适合直接 RL；缺点是每增加一个工具，就需要增加新的标签和解析规则。</p>
+
+      <h3>4.2 统一的 XML + JSON 工具调用</h3>
+<pre><code>&lt;think&gt;
+需要查询该战队的首个 Major 冠军年份。
+&lt;/think&gt;
+&lt;tool_call&gt;
+{
+  "name": "text_search",
+  "arguments": {
+    "query": ["Natus Vincere first Counter-Strike Major title"]
+  }
+}
+&lt;/tool_call&gt;</code></pre>
+      <p>这是训练型多模态搜索 Agent 中最常见的形式。Vision-DeepResearch、OpenSearch-VL、VSearcher、SimpleSearch-VL 和 MM-DeepResearch 都采用了相近的统一调用思路。新增 <code>crop</code>、<code>visit</code>、<code>OCR</code> 或 <code>super_resolution</code> 时，只需扩充工具 Schema。</p>
+
+      <h3>4.3 自定义多动作标签</h3>
+<pre><code>&lt;query&gt;...&lt;/query&gt;
+&lt;clip&gt;...&lt;/clip&gt;
+&lt;tool name="fetch_webpage_text"&gt;...&lt;/tool&gt;
+&lt;code&gt;...&lt;/code&gt;
+&lt;done&gt;最终答案&lt;/done&gt;</code></pre>
+      <p><strong>InterLV-Search</strong> 的 Harness 使用这一设计，分别解析搜索、裁剪、网页读取、Python 和结束动作。</p>
+
+      <h3>4.4 原生 Function Calling / MCP</h3>
+      <p>模型 API 直接返回结构化的 <code>tool_calls</code> 字段，而不是在可见文本里输出 <code>&lt;search&gt;</code>。BrowseComp-V3 的 OmniSeeker 参考运行器使用 OpenAI 兼容函数调用，并通过 MCP 工具服务器执行 TextSearch、ImageSearch、ReverseImageSearch、WebVisit 和 CropImage。</p>
+<pre><code>{
+  "role": "assistant",
+  "content": null,
+  "tool_calls": [{
+    "id": "call_01",
+    "function": {
+      "name": "TextSearch",
+      "arguments": "{\"query\":\"NAVI first Major title\"}"
+    }
+  }]
+}</code></pre>
+
+      <h2 id="trace">5. 一条模拟真实逻辑的完整搜索轨迹</h2>
+      <p>下面使用统一 <code>&lt;tool_call&gt;</code> 协议，模拟一个图片识别加事实查询任务。格式与多个项目的公开 Prompt 一致，但具体问题为演示构造。</p>
+
+      <h3>第 0 步：Harness 把工具 Schema 放入系统提示词</h3>
+<pre><code>&lt;tools&gt;
+{"name":"image_search","parameters":{"image":"string","bbox":"[x1,y1,x2,y2]"}}
+{"name":"text_search","parameters":{"query":"array[string]"}}
+{"name":"visit","parameters":{"url":"array[string]","goal":"string"}}
+&lt;/tools&gt;
+
+规则：每轮只能输出一个 tool_call；工具调用后结束当前消息并等待结果。</code></pre>
+
+      <h3>第 1 轮：模型请求局部图片搜索</h3>
+<pre><code>&lt;think&gt;
+球衣胸前的徽标是识别战队的关键，应先裁剪并进行反向图片搜索。
+&lt;/think&gt;
+&lt;tool_call&gt;
+{
+  "name": "image_search",
+  "arguments": {
+    "image": "img_1",
+    "bbox": [410, 270, 590, 470]
+  }
+}
+&lt;/tool_call&gt;
+&lt;|im_end|&gt;</code></pre>
+      <p>推理引擎停止后，Harness 解析 JSON，裁剪图片、上传公开对象存储，再调用 Lens/反向图片搜索 API。</p>
+
+      <h3>第 1 次外部 API 请求</h3>
+<pre><code>POST /search
+Authorization: Bearer ${SEARCH_API_KEY}
+
+{
+  "engine": "google_lens",
+  "url": "https://image-host.example/crop_410_270_590_470.jpg",
+  "num": 5
+}</code></pre>
+      <p>搜索服务返回原始 JSON，Harness 标准化为：</p>
+<pre><code>[
+  {
+    "rank": 1,
+    "title": "Natus Vincere official logo",
+    "thumbnail_url": "https://.../thumb.jpg",
+    "image_url": "https://.../full.jpg",
+    "source_url": "https://.../navi-team"
+  }
+]</code></pre>
+      <p>如果框架支持视觉 Observation，它还会下载缩略图或高清图并注册为 <code>img_2</code>、<code>img_3</code>，让模型在下一轮真正看到候选图片，而不是只看到 URL。</p>
+
+      <h3>第 2 轮：模型根据 Observation 改用文本搜索</h3>
+<pre><code>&lt;tool_response&gt;
+候选 1：Natus Vincere official logo
+来源：https://example.com/navi-team
+视觉匹配：高
+&lt;/tool_response&gt;
+
+&lt;think&gt;
+局部图片搜索已将战队定位为 Natus Vincere。现在需要查询其首个
+Counter-Strike Major 冠军年份。
+&lt;/think&gt;
+&lt;tool_call&gt;
+{
+  "name": "text_search",
+  "arguments": {
+    "query": [
+      "Natus Vincere first Counter-Strike Major championship year",
+      "NAVI first Major title history"
+    ]
+  }
+}
+&lt;/tool_call&gt;</code></pre>
+
+      <h3>第 3 轮：模型决定访问来源网页</h3>
+<pre><code>&lt;tool_response&gt;
+1. PGL Major Stockholm 2021 — snippet: NAVI claimed their first Major...
+2. Natus Vincere history — snippet: ...
+&lt;/tool_response&gt;
+
+&lt;think&gt;
+搜索摘要已给出候选年份，但应访问权威来源确认“首个 Major”的表述。
+&lt;/think&gt;
+&lt;tool_call&gt;
+{
+  "name": "visit",
+  "arguments": {
+    "url": ["https://example.com/official-history"],
+    "goal": "确认 Natus Vincere 获得首个 Counter-Strike Major 冠军的年份"
+  }
+}
+&lt;/tool_call&gt;</code></pre>
+      <p><code>visit</code> 背后可能是 Jina Reader、Playwright 或自建抓取器。完整网页不一定全部进入主模型上下文；Harness 可以先截断、切块检索或用辅助模型提取证据。</p>
+
+      <h3>第 4 轮：最终回答</h3>
+<pre><code>&lt;think&gt;
+权威来源确认 Natus Vincere 在 PGL Major Stockholm 2021 获得队史首个
+Counter-Strike Major 冠军。
+&lt;/think&gt;
+&lt;answer&gt;2021 年。&lt;/answer&gt;</code></pre>
+      <div class="warning"><strong>关键点：</strong>所谓“工具调用后继续生成”，在逻辑上通常是一次新的模型调用。上一轮输出、工具 Observation 和新一轮 assistant 起始标记共同组成新的上下文。</div>
+
+      <h2 id="projects">6. 十二个代表项目：协议、Harness 与训练方式</h2>
+      <div class="table-wrap"><table><thead><tr><th>项目</th><th>动作协议</th><th>Harness / 工具特点</th><th>如何获得搜索能力</th></tr></thead><tbody>
+        <tr><td><strong>MMSearch-R1</strong><br/>2025</td><td>专属标签：图片搜索与文本搜索</td><td>整轮生成后解码并识别标签；真实在线文本/图片搜索；结果奖励加搜索惩罚</td><td>以 Qwen2.5-VL 为基础，直接 GRPO；其简单工具空间使无冷启动 SFT 成为可能</td></tr>
+        <tr><td><strong>DeepMMSearch-R1</strong><br/>2025</td><td>学习到的工具调用标签 Schema</td><td>Grounding、整图/局部图片搜索、文本搜索；结果回注后持续多轮 rollout</td><td>冷启动 SFT → 在线 RL；SFT 先教会标签、工具选择与查询构造</td></tr>
+        <tr><td><strong>DeepEyesV2</strong><br/>2025</td><td>统一结构化工具调用</td><td>在同一推理环中统一代码执行与网页搜索</td><td>冷启动 SFT + RL；论文指出直接 RL 难以形成稳定工具行为</td></tr>
+        <tr><td><strong>Vision-DeepResearch</strong><br/>2026</td><td><code>&lt;think&gt;</code> + <code>&lt;tool_call&gt;</code> / <code>&lt;answer&gt;</code></td><td>多轮、多实体、多尺度裁剪和视觉/文本搜索；真实在线环境</td><td>冷启动监督 + RL；监督 think、tool_call 与 answer</td></tr>
+        <tr><td><strong>OpenSearch-VL</strong><br/>2026</td><td>一个 <code>&lt;tool_call&gt;{JSON}</code> / 每轮</td><td>七类检索、图像增强和解析工具；支持工具调用中断与恢复</td><td>SearchVL-SFT-36k → SearchVL-RL-8k；使用 failure-aware GRPO</td></tr>
+        <tr><td><strong>VSearcher</strong><br/>2026</td><td>严格的 <code>&lt;think&gt;</code> + 一个 <code>&lt;tool_call&gt;</code> 或 <code>&lt;answer&gt;</code></td><td>文本搜索、图片搜索、visit；真实网页环境中的长程多轮轨迹</td><td>拒绝采样微调 → RL</td></tr>
+        <tr><td><strong>SimpleSearch-VL</strong><br/>2026</td><td><code>&lt;thinking&gt;</code> + 一个 JSON 工具调用</td><td>文本搜索、局部/多图图片搜索、visit；允许在单次调用内批量查询</td><td>工具交错 SFT → RL</td></tr>
+        <tr><td><strong>MM-DeepResearch</strong><br/>2026</td><td><code>&lt;tool_call&gt;</code> / <code>&lt;tool_response&gt;</code> / <code>&lt;answer&gt;</code></td><td>统一函数 Schema；利用离线搜索引擎降低 RL 成本</td><td>合成深度研究搜索轨迹做 SFT → 多轮 GRPO</td></tr>
+        <tr><td><strong>InterLV-Search</strong><br/>2026</td><td><code>&lt;query&gt;</code>、<code>&lt;tool&gt;</code>、<code>&lt;clip&gt;</code>、<code>&lt;code&gt;</code>、<code>&lt;done&gt;</code></td><td>自定义动作解析器、Skill Registry、运行记忆、在线和本地检索模式</td><td>主要是模型无关评测 Harness；依靠 Prompt 和现有模型工具能力，不是专用训练方案</td></tr>
+        <tr><td><strong>BrowseComp-V3 / OmniSeeker</strong><br/>2026</td><td>原生 OpenAI-compatible <code>tool_calls</code></td><td>通过 MCP 暴露 TextSearch、ImageSearch、ReverseImageSearch、WebVisit、CropImage</td><td>参考评测运行器；主要依靠工具 Schema / Prompt 驱动现成模型</td></tr>
+        <tr><td><strong>AgentVista</strong><br/>2026</td><td>受控工具环境中的结构化调用</td><td>网页搜索、图片搜索、页面导航和代码操作；评测长程交错工具使用</td><td>Benchmark，不训练统一专用模型</td></tr>
+        <tr><td><strong>MMSearch-Plus</strong><br/>2025/2026</td><td>模型无关 Agent 接口</td><td>强调局部视觉信号、裁剪图搜索、来源验证和最多多轮浏览</td><td>Benchmark / 推理框架，不是一条固定 SFT-RL 配方</td></tr>
+      </tbody></table></div>
+      <p>由此可以看到：<strong>大家并不是都使用字面意义上的 <code>&lt;search&gt;</code> 标签</strong>。真正形成共识的是“模型输出可解析的结构化动作”；统一的 <code>&lt;tool_call&gt; + JSON</code> 正在成为训练型开源 Agent 中最常见的协议。</p>
+
+      <h2 id="learning">7. 模型原生理解 <code>&lt;search&gt;</code> 吗？Prompt、SFT 与 RL 各自教什么？</h2>
+      <h3>7.1 模型不会天然把标签连接到 API</h3>
+      <p>Tokenizer 可能认识 <code>&lt;tool_call&gt;</code> 或把它拆成若干 token；模型也可能因通用指令训练而具备 JSON、XML 和函数调用先验。但它不会天然知道你项目中的 <code>image_search</code> 对应 SerpAPI，或 <code>visit</code> 对应 Jina Reader。</p>
+      <h3>7.2 Prompt：声明临时协议</h3>
+      <p>Prompt 告诉模型有哪些工具、参数是什么、何时使用、每轮调用几个以及最终答案格式。AgentVista、InterLV-Search、BrowseComp-V3 与 MMSearch-Plus 等评测型 Harness 主要依赖这种方式驱动现成模型。</p>
+      <h3>7.3 Few-shot：展示一条完整交互</h3>
+      <p>Few-shot 让模型看到“提出动作 → 停止当前回合 → 接收工具结果 → 根据 Observation 继续”的完整样例，比只给 JSON Schema 更容易稳定遵循协议。</p>
+      <h3>7.4 SFT：稳定格式与基本策略</h3>
+      <p>SFT 把合法格式、工具选择、query 构造、结果利用和停止条件写入参数。DeepMMSearch-R1、DeepEyesV2、Vision-DeepResearch、OpenSearch-VL、VSearcher、SimpleSearch-VL 和 MM-DeepResearch 都采用了 SFT 后再 RL 的路线。</p>
+      <h3>7.5 RL：优化何时搜、搜什么、何时停</h3>
+      <p>RL 并不主要教 JSON 语法，而是优化工具使用策略：搜索是否必要、使用图片还是文本、如何改写 query、是否访问网页、是否重复搜索，以及如何在预算内得到正确答案。</p>
+      <div class="note"><strong>MMSearch-R1 是重要例外：</strong>它在较简单的双工具环境中展示了直接 GRPO 的可行性；而 DeepEyesV2 等复杂工具环境发现，缺少冷启动 SFT 时工具调用会不稳定。二者并不矛盾，差别主要来自工具空间、基础模型先验、奖励设计和训练数据难度。</div>
+
+      <h2 id="sft">8. SFT 数据到底长什么样？</h2>
+      <p>一条工具轨迹可以被序列化成多轮聊天：</p>
+<pre><code>USER:
+问题 + 图片
+
+ASSISTANT:              # 计算 loss
+&lt;think&gt;需要先识别图片实体&lt;/think&gt;
+&lt;tool_call&gt;{"name":"image_search", ...}&lt;/tool_call&gt;
+
+TOOL / ENVIRONMENT:     # 通常不计算 loss
+&lt;tool_response&gt;搜索结果……&lt;/tool_response&gt;
+
+ASSISTANT:              # 计算 loss
+&lt;think&gt;实体已识别，继续文本搜索&lt;/think&gt;
+&lt;tool_call&gt;{"name":"text_search", ...}&lt;/tool_call&gt;
+
+TOOL / ENVIRONMENT:     # 不计算 loss
+&lt;tool_response&gt;网页结果……&lt;/tool_response&gt;
+
+ASSISTANT:              # 计算 loss
+&lt;think&gt;证据充分&lt;/think&gt;
+&lt;answer&gt;最终答案&lt;/answer&gt;</code></pre>
+      <p>训练掩码的核心原则是：</p>
+<pre><code>用户问题 token              loss_mask = 0
+模型 think/tool_call token   loss_mask = 1
+工具 observation token      loss_mask = 0
+模型最终 answer token        loss_mask = 1</code></pre>
+      <p>工具结果不是模型生成的动作，因此不应该让模型学习“背诵搜索引擎返回内容”；模型需要学习的是如何读取 Observation 后生成下一步动作。</p>
+
+      <h2 id="rl">9. RL Rollout：搜索环境如何进入强化学习</h2>
+      <p>RL 时，模型需要真正与 Harness 多轮交互：</p>
+<pre><code>for turn in range(max_turns):
+    output = policy.generate(messages)
+
+    if valid_tool_call(output):
+        observation = environment.execute(parse(output))
+        messages += [assistant(output), tool(observation)]
+        continue
+
+    if valid_answer(output):
+        break
+
+reward = answer_score
+reward += format_score
+reward -= tool_cost
+reward -= invalid_call_penalty
+update_policy(reward)</code></pre>
+      <p>常见奖励项包括：</p>
+      <ul><li>最终答案正确奖励；</li><li>工具格式合法奖励；</li><li>来源或证据支持奖励；</li><li>搜索和网页访问成本惩罚；</li><li>重复搜索、无效参数和超时惩罚；</li><li>过程奖励或失败前有效步骤保留。</li></ul>
+      <p>真实在线 API 会带来搜索排序漂移、网页失效、Reader 失败和延迟波动。MM-DeepResearch 使用离线搜索环境降低训练成本；OpenSearch-VL 则专门讨论了工具失败导致长轨迹后半段失效的问题。</p>
+
+      <h2 id="recommendation">10. 面向后续 SFT / RL 项目的 Harness 设计建议</h2>
+      <ol>
+        <li><strong>采用统一 JSON 协议：</strong><code>&lt;tool_call&gt;{"name":...,"arguments":...}&lt;/tool_call&gt;</code>，不要为每个工具发明新外层标签。</li>
+        <li><strong>每轮一个动作：</strong>需要并行搜索时允许在一个工具调用中批量传入多个 query 或多个 region，降低解析复杂度。</li>
+        <li><strong>明确停止条件：</strong>可在 <code>&lt;/tool_call&gt;</code> 处停止，或生成到消息 EOS 后解析，但训练和推理必须保持一致。</li>
+        <li><strong>Observation 不计监督损失：</strong>只训练模型产生的 think、tool_call 和 answer。</li>
+        <li><strong>分开记录动作和环境：</strong>轨迹中保存原始 token、解析后的动作、API 原始响应、标准化 Observation 和错误状态。</li>
+        <li><strong>设置硬预算：</strong>固定 max turns、各工具调用次数、Top-K、Reader 长度、上下文长度和超时。</li>
+        <li><strong>同时维护在线与重放环境：</strong>在线环境衡量真实可用性，固定缓存重放环境用于公平训练和可复现评测。</li>
+        <li><strong>把格式能力和搜索策略分开评测：</strong>合法工具调用不等于工具真的提供了答案关键证据。</li>
+      </ol>
+      <div class="takeaway"><strong>最终理解：</strong><code>&lt;search&gt;</code> 不是搜索能力本身，而是一种动作语言。Prompt 定义动作语言，SFT 让模型稳定说这种语言，RL 优化什么时候说、说什么；Harness 则把语言翻译成真实世界中的搜索、访问、裁剪和计算。</div>
+
+      <h2>参考资料</h2>
+      <ol class="references">
+        <li><a href="https://arxiv.org/abs/2506.20670" target="_blank" rel="noreferrer">MMSearch-R1: Incentivizing LMMs to Search</a>；<a href="https://github.com/EvolvingLMMs-Lab/multimodal-search-r1" target="_blank" rel="noreferrer">官方代码</a></li>
+        <li><a href="https://arxiv.org/abs/2510.12801" target="_blank" rel="noreferrer">DeepMMSearch-R1: Empowering Multimodal LLMs in Multimodal Web Search</a></li>
+        <li><a href="https://arxiv.org/abs/2511.05271" target="_blank" rel="noreferrer">DeepEyesV2: Toward Agentic Multimodal Model</a>；<a href="https://github.com/Visual-Agent/DeepEyesV2" target="_blank" rel="noreferrer">官方代码</a></li>
+        <li><a href="https://arxiv.org/abs/2601.22060" target="_blank" rel="noreferrer">Vision-DeepResearch</a>；<a href="https://github.com/Osilly/Vision-DeepResearch" target="_blank" rel="noreferrer">官方代码</a></li>
+        <li><a href="https://arxiv.org/abs/2605.05185" target="_blank" rel="noreferrer">OpenSearch-VL</a></li>
+        <li><a href="https://arxiv.org/abs/2603.02795" target="_blank" rel="noreferrer">VSearcher</a></li>
+        <li><a href="https://arxiv.org/abs/2606.31504" target="_blank" rel="noreferrer">SimpleSearch-VL</a></li>
+        <li><a href="https://arxiv.org/abs/2603.01050" target="_blank" rel="noreferrer">MM-DeepResearch</a></li>
+        <li><a href="https://github.com/hbhalpha/InterLV-Search-Bench" target="_blank" rel="noreferrer">InterLV-Search-Bench 官方代码</a></li>
+        <li><a href="https://arxiv.org/abs/2602.12876" target="_blank" rel="noreferrer">BrowseComp-V3</a>；<a href="https://github.com/Halcyon-Zhang/BrowseComp-V3" target="_blank" rel="noreferrer">官方代码</a></li>
+        <li><a href="https://arxiv.org/abs/2602.23166" target="_blank" rel="noreferrer">AgentVista</a></li>
+        <li><a href="https://arxiv.org/abs/2508.21475" target="_blank" rel="noreferrer">MMSearch-Plus</a></li>
+      </ol>
+    </article>
+
+    <aside class="aside-card"><strong>文章定位</strong><br/>本文关注“模型动作—Harness—搜索 API—训练轨迹”的工程链路，不把搜索 API 的性能误归因于模型参数。<br/><br/><strong>更新日期</strong><br/>2026-07-12</aside>
+  </div>
+</main>
+<footer class="footer"><div class="footer-inner"><span>© 2026 Guanping's Research Notes</span><a href="../index.html">返回首页</a></div></footer>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "Guanping's Research Notes",
+  "short_name": "Guanping Notes",
+  "description": "多模态搜索与 Agent 后训练研究笔记",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f4ef",
+  "theme_color": "#0b6b4d",
+  "icons": [
+    {
+      "src": "assets/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

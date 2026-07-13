@@ -16,7 +16,7 @@
   <meta name="twitter:card" content="summary" />
   <link rel="icon" href="assets/favicon.svg" />
   <link rel="manifest" href="site.webmanifest" />
-  <link rel="stylesheet" href="assets/styles.css?v=3" />
+  <link rel="stylesheet" href="assets/styles.css?v=4" />
 </head>
 <body>
   <header class="site-header">
@@ -39,7 +39,7 @@
         <h1><a href="posts/deepsearch-from-zero.html">一个 Agent Search 轨迹是怎么样的？</a></h1>
         <div class="post-meta"><time datetime="2026-07-12">2026 年 7 月 12 日</time></div>
         <p>如果只看最终回答，DeepSearch 和普通问答没有区别。真正需要训练的是中间过程：模型为什么发起搜索，工具返回了什么，以及什么时候证据已经足够。</p>
-        <p>本文从一条完整轨迹出发，依次拆解 Harness、SFT messages、assistant-only loss mask、RL rollout、reward 与错误后的 token mask。</p>
+        <p>本文从一条完整轨迹出发，拆开消息历史、事件日志、图片状态和 Harness，看看一次搜索怎样被执行、记录和调试。</p>
         <a class="read-more" href="posts/deepsearch-from-zero.html">继续阅读全文 »</a>
       </article>
 
@@ -55,7 +55,7 @@
           <li data-search-item>
             <time datetime="2026-07-12">2026 年 7 月 12 日</time><span>»</span>
             <a href="posts/deepsearch-from-zero.html">一个 Agent Search 轨迹是怎么样的？</a>
-            <p>从运行时消息、SFT loss mask 到 RL rollout，拆开一个搜索 Agent 的训练样本。</p>
+            <p>从完整事件日志出发，解释工具调用、观察回填、图片状态和停止条件。</p>
           </li>
         </ol>
         <a class="archive-link" href="archives.html">查看全部文章……</a>
@@ -78,7 +78,7 @@
       </section>
       <section class="side-card">
         <h2>链接</h2>
-        <p><a href="https://scholar.google.com.hk/?hl=zh-CN">Google Scholar</a> · <a href="https://github.com/zhonghaochang">GitHub</a> · <a href="about.html">关于</a></p>
+        <ul class="link-list"><li><a href="https://scholar.google.com.hk/citations?user=bjasV5wAAAAJ&amp;hl=zh-CN">Google Scholar</a></li><li><a href="https://github.com/zhonghaochang">GitHub</a></li><li><a href="about.html">关于</a></li></ul>
       </section>
     </aside>
   </main>

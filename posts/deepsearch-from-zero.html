@@ -4,19 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>一个 Agent Search 轨迹是怎么样的？｜常中豪</title>
-  <meta name="description" content="从运行时消息、SFT loss mask 到 RL rollout，逐层拆开一个搜索 Agent 的训练样本。" />
+  <meta name="description" content="从一次完整搜索出发，拆开 Agent Search 轨迹里的消息、工具调用、观察、日志和停止条件。" />
   <meta name="theme-color" content="#f4f3d9" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/deepsearch-from-zero.html" />
   <meta property="og:locale" content="zh_CN" />
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="常中豪的技术博客" />
   <meta property="og:title" content="一个 Agent Search 轨迹是怎么样的？" />
-  <meta property="og:description" content="从一次完整搜索，到 SFT 样本、loss mask 和 RL rollout。" />
+  <meta property="og:description" content="不从框架名词讲起，直接打开一条 Agent Search 的事件日志。" />
   <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/deepsearch-from-zero.html" />
   <meta property="article:published_time" content="2026-07-12" />
   <meta name="twitter:card" content="summary" />
   <link rel="icon" href="../assets/favicon.svg" />
-  <link rel="stylesheet" href="../assets/styles.css?v=3" />
+  <link rel="stylesheet" href="../assets/styles.css?v=4" />
 </head>
 <body>
   <div class="progress"></div>
@@ -33,272 +33,153 @@
       <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
       <div class="article-headline">
         <h1>一个 Agent Search 轨迹是怎么样的？</h1>
-        <p class="article-deck">从运行时消息、SFT loss mask 到 RL rollout，逐层拆开一个搜索 Agent 的样本。重点不是“调用搜索 API”，而是模型、工具环境和训练目标怎样共同塑造一次搜索。</p>
+        <p class="article-deck">这篇文章只做一件事：把一次搜索从问题到答案完整摊开，看看模型、工具和运行时各自做了什么。</p>
       </div>
       <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 12 日</div>
     </header>
 
     <div class="article-layout">
       <article class="article">
-        <p>如果只看最终回答，DeepSearch 和普通问答没有区别。真正需要训练的是中间过程：模型先看到了什么，为什么发起这次搜索，工具返回了什么，下一步为什么改查另一个线索，以及什么时候证据已经足够。</p>
-        <p>这篇文章从一条代表性轨迹开始，把它分别改写成运行时消息、SFT 样本和 RL rollout。示例采用“根据一张桥梁照片识别地点并确认通车年份”的任务；它是为了讲清结构而重写的工程示例，不是某篇论文逐字公开的训练数据。</p>
+        <p>介绍 Agent Search 时，最常见的图是一个循环：模型给出 action，工具返回 observation，然后模型继续推理。图没有错，但真正调试 Agent 时，这张图几乎帮不上忙。我们需要看到的是：每一轮到底输入了什么、输出了什么，哪条证据让搜索方向发生了变化。</p>
+        <p>下面用一个具体问题来拆。用户上传了一张桥的照片，问：“这座桥叫什么，哪一年正式通车？”照片里能看出桥塔和一块很小的路牌，但仅靠图像无法可靠回答年份。</p>
 
-        <h2>1. 先把一次 DeepSearch 拆开</h2>
-        <p>一条多模态 DeepSearch 轨迹至少包含五种状态：原始问题、视觉观察、模型动作、工具观察和最终答案。它不是一段越写越长的思维文本，而是模型和环境交替推进的状态机。</p>
-        <div class="loop-grid" aria-label="DeepSearch 轨迹阶段">
-          <div class="loop-step"><span>01</span><strong>Observe</strong><br />问题与原图</div>
-          <div class="loop-step"><span>02</span><strong>Act</strong><br />裁剪或搜索</div>
-          <div class="loop-step"><span>03</span><strong>Receive</strong><br />候选与网页</div>
-          <div class="loop-step"><span>04</span><strong>Verify</strong><br />交叉核验</div>
-          <div class="loop-step"><span>05</span><strong>Answer</strong><br />带证据作答</div>
-        </div>
-        <p>例如，原图中的桥塔轮廓很明显，但路牌太小。合理轨迹不会直接猜桥名，而是先裁剪桥塔和路牌，再用图片搜索获得候选实体，最后用文本搜索确认年份。</p>
+        <h2>先看完整轨迹</h2>
+        <p>这条轨迹参考了 OpenSearch-VL 附录中的 Kessock Bridge 案例，我把它改写成更接近工程日志的格式。关键不在桥，而在三次动作的顺序：先缩小视觉范围，再确认实体，最后查实体属性。</p>
 
-        <div class="code-frame"><div class="code-head"><span class="code-file">trace.jsonl · 人类可读的审计轨迹</span><button class="copy-btn">复制</button></div><pre><code>{"step": 0, "role": "user", "image": "bridge.jpg",
- "question": "图中的桥叫什么？哪一年正式通车？"}
+        <div class="code-frame"><div class="code-head"><span class="code-file">episode.jsonl</span><button class="copy-btn">复制</button></div><pre><code>{"step": 0, "type": "question",
+ "image": "bridge.jpg",
+ "text": "这座桥叫什么，哪一年正式通车？"}
 
-{"step": 1, "role": "assistant", "action": "crop",
- "args": {"image": "bridge.jpg", "box": [0.18, 0.12, 0.82, 0.88]},
- "reason": "桥塔和路牌是最有区分度的区域。"}
-{"step": 1, "role": "tool", "image": "crop_001.jpg"}
+{"step": 1, "type": "tool_call", "name": "crop",
+ "arguments": {"image_id": "img_0", "box": [420, 90, 980, 530]}}
+{"step": 1, "type": "tool_result", "ok": true,
+ "image_id": "img_1", "parent": "img_0", "path": "crop_001.jpg"}
 
-{"step": 2, "role": "assistant", "action": "image_search",
- "args": {"image": "crop_001.jpg"},
- "reason": "先确定实体，再查时间属性。"}
-{"step": 2, "role": "tool",
- "observation": {"candidates": ["Kessock Bridge", "Skye Bridge"],
-                 "pages": [".../kessock-bridge", ".../skye-bridge"]}}
+{"step": 2, "type": "tool_call", "name": "image_search",
+ "arguments": {"image_id": "img_1"}}
+{"step": 2, "type": "tool_result", "ok": true,
+ "candidates": [
+   {"name": "Kessock Bridge", "score": 0.87},
+   {"name": "Skye Bridge", "score": 0.41}
+ ]}
 
-{"step": 3, "role": "assistant", "action": "text_search",
- "args": {"query": "Kessock Bridge officially opened year"},
- "reason": "图像候选尚不能证明通车年份。"}
-{"step": 3, "role": "tool",
- "observation": {"snippets": ["The Kessock Bridge was opened in 1982 ..."]}}
+{"step": 3, "type": "tool_call", "name": "text_search",
+ "arguments": {"query": "Kessock Bridge official opening year"}}
+{"step": 3, "type": "tool_result", "ok": true,
+ "passages": [{"title": "Kessock Bridge", "text": "... opened in 1982 ..."}]}
 
-{"step": 4, "role": "assistant",
- "answer": "图中是 Kessock Bridge，1982 年正式通车。"}</code></pre></div>
+{"step": 4, "type": "final",
+ "text": "图中是 Kessock Bridge，1982 年正式通车。"}</code></pre></div>
 
-        <div class="note"><strong>关键区别：</strong>消息历史是模型的输入；审计轨迹是训练与评测系统保存的结构化记录。两者通常不完全相同。耗时、HTTP 状态码、原始网页和 reward 可以写进审计日志，但不必全部塞回模型上下文。</div>
+        <p>这里有两个容易忽略的点。</p>
+        <p>第一，图片搜索只解决了“它是谁”，并没有解决“何时通车”。如果模型看到第一个候选就作答，答案里的年份还是参数记忆或猜测。文本搜索不是重复检索，而是在补齐另一个信息槽。</p>
+        <p>第二，裁剪结果不是一张临时图片。它有自己的 <code>image_id</code>，同时保存父图片和裁剪参数。后面的图片搜索引用的是 <code>img_1</code>。没有这层关系，跑完以后很难知道模型究竟搜了原图还是路牌。</p>
 
-        <h2>2. Harness 才是搜索 Agent 的运行时</h2>
-        <p>Harness 可以理解为模型外面的控制器。它负责把工具 schema 注入上下文、解析动作、执行工具、保存新图片、压缩网页、维护预算，并把 observation 重新交给模型。模型只“提出动作”，不能直接越过 Harness 操作网络。</p>
+        <h2>消息历史和事件日志不是一回事</h2>
+        <p>模型看到的是一串对话消息；工程侧应该保存的是事件日志。两者经常被混成一个 JSON，最后既浪费上下文，也不好排查问题。</p>
+        <p>给模型的 tool result 应该短、稳定，只保留下一步决策需要的字段：</p>
 
-        <div class="code-frame"><div class="code-head"><span class="code-file">harness.py · 最小但完整的控制循环</span><button class="copy-btn">复制</button></div><pre><code>from dataclasses import dataclass, field
-from typing import Any
+        <div class="code-frame"><div class="code-head"><span class="code-file">model_messages.json</span><button class="copy-btn">复制</button></div><pre><code>[
+  {"role": "user", "content": [
+    {"type": "image", "image_id": "img_0"},
+    {"type": "text", "text": "这座桥叫什么，哪一年正式通车？"}
+  ]},
+  {"role": "assistant", "tool_call": {
+    "name": "crop", "arguments": {"image_id": "img_0", "box": [420, 90, 980, 530]}
+  }},
+  {"role": "tool", "name": "crop", "content": [
+    {"type": "image", "image_id": "img_1"}
+  ]}
+]</code></pre></div>
 
-@dataclass
-class Episode:
-    messages: list[dict[str, Any]]
-    audit: list[dict[str, Any]] = field(default_factory=list)
-    calls_left: int = 8
-    done: bool = False
+        <p>而审计日志可以更啰嗦：工具耗时、重试次数、原始 URL、缓存命中、HTTP 状态和 token 数都应该留在这里。它们对模型没用，对定位“为什么这一批 rollout 突然变慢”却很重要。</p>
 
-def run_episode(model, registry, prompt, image):
-    ep = Episode(messages=[{
-        "role": "user",
-        "content": [
-            {"type": "image", "path": image},
-            {"type": "text", "text": prompt},
-        ],
-    }])
+        <div class="code-frame"><div class="code-head"><span class="code-file">audit_event.json</span><button class="copy-btn">复制</button></div><pre><code>{
+  "episode_id": "bridge_0042",
+  "step": 2,
+  "tool": "image_search",
+  "latency_ms": 1834,
+  "attempt": 1,
+  "cache_hit": false,
+  "request": {"image_id": "img_1"},
+  "result_count": 5,
+  "raw_artifact": "artifacts/bridge_0042/step_2.json"
+}</code></pre></div>
 
-    while not ep.done and ep.calls_left &gt; 0:
-        raw = model.generate(ep.messages, tools=registry.schemas())
-        event = parse_one_event(raw)  # answer 或恰好一个 tool_call
-        ep.audit.append({"model_raw": raw, "event": event})
+        <h2>Harness 实际上只负责四件事</h2>
+        <p>模型不会直接访问搜索引擎。它输出一个动作，Harness 负责解析、执行、回填和终止。把这四件事写清楚以后，Agent 框架叫什么反而没有那么重要。</p>
 
-        if event["type"] == "answer":
-            ep.messages.append({"role": "assistant", "content": raw})
-            ep.done = True
-            break
+        <div class="code-frame"><div class="code-head"><span class="code-file">search_loop.py</span><button class="copy-btn">复制</button></div><pre><code>def run_episode(model, tools, messages, max_steps=8):
+    events = []
 
+    for step in range(max_steps):
+        raw = model.generate(messages, tool_schemas=tools.schemas())
+        action = parse_one_action(raw)  # final 或恰好一个 tool_call
+
+        if action.type == "final":
+            events.append({"step": step, "type": "final", "text": action.text})
+            return {"answer": action.text, "events": events, "status": "finished"}
+
+        started = now_ms()
         try:
-            result = registry.execute(event["name"], event["arguments"])
-            observation = normalize_observation(result)
-        except Exception as exc:
-            observation = {"ok": False, "error": type(exc).__name__}
+            result = tools.execute(action.name, action.arguments)
+            observation = compact(result)  # 给模型的短结果
+            ok = True
+        except ToolError as exc:
+            observation = {"ok": False, "error": exc.code, "retryable": exc.retryable}
+            ok = False
 
-        ep.messages.extend([
-            {"role": "assistant", "content": raw},
-            {"role": "tool", "name": event["name"],
-             "content": observation},
+        messages.extend([
+            {"role": "assistant", "tool_call": action.as_dict()},
+            {"role": "tool", "name": action.name, "content": observation},
         ])
-        ep.calls_left -= 1
+        events.append({
+            "step": step, "type": "tool", "name": action.name,
+            "ok": ok, "latency_ms": now_ms() - started,
+            "arguments": action.arguments,
+        })
 
-    return ep</code></pre></div>
+    return {"answer": None, "events": events, "status": "budget_exhausted"}</code></pre></div>
 
-        <p>这里有三个很容易被忽略的设计点。</p>
-        <ol>
-          <li><strong>一次只允许一个动作。</strong>这样 observation 的归因最清楚，也方便对错误之后的 token 做 mask。</li>
-          <li><strong>工具结果必须归一化。</strong>搜索引擎原始响应会变化，训练数据应保存稳定字段，例如标题、URL、摘要和本地图片引用。</li>
-          <li><strong>错误也是 observation。</strong>偶发超时应该让模型看到可恢复错误，而不是让整个进程崩溃；连续错误再触发终止。</li>
-        </ol>
+        <p><code>parse_one_action</code> 很值得单独写测试。很多看起来像“模型不会用工具”的问题，其实是协议边界不清：同一轮输出两个调用、JSON 后面又接一段自然语言，或者参数名和 schema 差一个字符。</p>
 
-        <h2>3. 同一条轨迹怎样变成 SFT 样本</h2>
-        <p>SFT 的作用是先教会模型协议和基本搜索策略。一个样本通常包含完整的多轮 messages；但训练 loss 并不覆盖所有 token。用户问题、工具 observation 和图片内容是条件，真正监督的是 assistant 应该输出的动作与答案。</p>
-
-        <div class="code-frame"><div class="code-head"><span class="code-file">sft_sample.json · 训练视角</span><button class="copy-btn">复制</button></div><pre><code>{
-  "messages": [
-    {"role": "system", "content": "每轮输出一个 tool_call 或 final。"},
-    {"role": "user", "content": [
-      {"type": "image", "path": "bridge.jpg"},
-      {"type": "text", "text": "桥名和正式通车年份是什么？"}
-    ]},
-    {"role": "assistant", "content":
-      "&lt;tool_call&gt;{\"name\":\"crop\",\"arguments\":{\"image\":\"bridge.jpg\",\"box\":[0.18,0.12,0.82,0.88]}}&lt;/tool_call&gt;"},
-    {"role": "tool", "name": "crop", "content": [
-      {"type": "image", "path": "crop_001.jpg"}
-    ]},
-    {"role": "assistant", "content":
-      "&lt;tool_call&gt;{\"name\":\"image_search\",\"arguments\":{\"image\":\"crop_001.jpg\"}}&lt;/tool_call&gt;"},
-    {"role": "tool", "name": "image_search", "content":
-      "候选：Kessock Bridge；Skye Bridge。"},
-    {"role": "assistant", "content":
-      "&lt;tool_call&gt;{\"name\":\"text_search\",\"arguments\":{\"query\":\"Kessock Bridge officially opened year\"}}&lt;/tool_call&gt;"},
-    {"role": "tool", "name": "text_search", "content":
-      "The Kessock Bridge was opened in 1982 ..."},
-    {"role": "assistant", "content":
-      "&lt;final&gt;图中是 Kessock Bridge，1982 年正式通车。&lt;/final&gt;"}
-  ]
-}</code></pre></div>
-
-        <div class="table-wrap"><table>
-          <thead><tr><th>消息部分</th><th>送入模型</th><th>计算 token loss</th><th>原因</th></tr></thead>
-          <tbody>
-            <tr><td>system / tool schema</td><td>是</td><td>否</td><td>条件，不是预测目标</td></tr>
-            <tr><td>user 文本与原图</td><td>是</td><td>否</td><td>问题条件</td></tr>
-            <tr><td>assistant tool_call</td><td>是</td><td>是</td><td>学习动作协议与参数</td></tr>
-            <tr><td>tool 文本 / 新图片</td><td>是</td><td>否</td><td>环境 observation</td></tr>
-            <tr><td>assistant final</td><td>是</td><td>是</td><td>学习停止与最终作答</td></tr>
-          </tbody>
-        </table></div>
-
-        <p>实现上常用 <code>-100</code> 标记不参与交叉熵的 token。多模态模型还要单独处理 image token：图片参与注意力计算，但工具返回的图片不是语言模型要“预测”的目标。</p>
-
-        <div class="code-frame"><div class="code-head"><span class="code-file">collator.py · assistant-only loss mask</span><button class="copy-btn">复制</button></div><pre><code>IGNORE_INDEX = -100
-
-def build_labels(rendered_turns, tokenizer):
-    input_ids, labels = [], []
-
-    for turn in rendered_turns:
-        ids = tokenizer(turn.text, add_special_tokens=False).input_ids
-        input_ids.extend(ids)
-
-        supervised = turn.role == "assistant"
-        labels.extend(ids if supervised else [IGNORE_INDEX] * len(ids))
-
-        # 视觉 embedding 由 processor 插入；它们只作为条件。
-        for start, end in turn.image_token_spans:
-            labels[start:end] = [IGNORE_INDEX] * (end - start)
-
-    assert len(input_ids) == len(labels)
-    return {"input_ids": input_ids, "labels": labels}</code></pre></div>
-
-        <p>不同项目对“reasoning token 是否监督”处理不同：如果数据里保留了显式 reason，就会一并学习；如果只保留 tool call，模型学习到的是更短的动作策略。真正不可省的是协议边界，否则模型很容易生成两个工具调用、缺括号的 JSON，或者在 tool_call 后继续输出自然语言。</p>
-
-        <h2>4. SFT 样本不是越长越好</h2>
-        <p>高质量轨迹至少要经过四层过滤：</p>
+        <h2>怎样判断一条轨迹好不好</h2>
+        <p>只看答案是否正确是不够的。上面这条轨迹至少还要检查下面几件事：</p>
         <ul>
-          <li><strong>答案验证：</strong>最终答案与标准答案或 judge 判定一致。</li>
-          <li><strong>协议验证：</strong>每个动作能被 parser 解析，参数满足 schema。</li>
-          <li><strong>过程验证：</strong>工具调用与当前证据相关，不能靠无关搜索碰巧命中。</li>
-          <li><strong>难度验证：</strong>过滤模型不用搜索就能答对的样本，否则它会学会跳过工具。</li>
+          <li><strong>动作有没有带来新信息。</strong>连续两次搜索返回相同候选，通常说明 query 没有收窄。</li>
+          <li><strong>证据是否覆盖答案里的每个事实。</strong>“桥名”和“年份”分别需要证据，不能拿一条相似图片同时证明两件事。</li>
+          <li><strong>是否及时停止。</strong>已有桥名和官方年份后再搜第三个网站，只会增加成本和噪声。</li>
+          <li><strong>失败能否恢复。</strong>一次超时可以重试或换 query；连续格式错误则应该结束，不能让模型在坏状态里继续生成。</li>
         </ul>
-        <p>这也是为什么“生成 20 万条轨迹”和“得到 2 万条可训练轨迹”是两个概念。DeepMMSearch-R1 从 20 万个 InfoSeek 问题出发，经 Gemini 2.5 Pro 生成和答案过滤后留下约 4.7 万条，再按任务分类平衡成 1 万条 SFT 数据。样本规模必须和过滤路径一起看。</p>
-
-        <h2>5. RL 样本和 SFT 样本到底差在哪</h2>
-        <p>SFT 数据已经给出了“应该怎样走”。RL 数据通常只给初始问题和可验证答案，模型在真实工具环境中自己 rollout。环境执行每个动作，直到模型回答、预算耗尽，或者发生致命错误。</p>
-
-        <div class="code-frame"><div class="code-head"><span class="code-file">rl_prompt.json · rollout 前只有题目与答案</span><button class="copy-btn">复制</button></div><pre><code>{
-  "prompt_id": "bridge_0042",
-  "messages": [{
-    "role": "user",
-    "content": [
-      {"type": "image", "path": "bridge.jpg"},
-      {"type": "text", "text": "桥名和正式通车年份是什么？"}
-    ]
-  }],
-  "ground_truth": {
-    "entity": ["Kessock Bridge"],
-    "year": ["1982"]
-  },
-  "tool_budget": 8
-}</code></pre></div>
-
-        <p>对同一个 prompt 采样一组轨迹后，组内会出现明显差异：有的直接猜错，有的搜到桥名却没核验年份，有的用三步得到正确答案，还有的十步以后才答对。GRPO 或 RLOO 这类方法利用组内相对优势更新策略。</p>
 
         <div class="table-wrap"><table>
-          <thead><tr><th>rollout</th><th>轨迹摘要</th><th>正确</th><th>格式</th><th>工具成本</th><th>总 reward</th></tr></thead>
+          <thead><tr><th>日志现象</th><th>常见原因</th><th>我会先查什么</th></tr></thead>
           <tbody>
-            <tr><td>A</td><td>直接猜 Skye Bridge</td><td>0</td><td>1</td><td>0</td><td>0.10</td></tr>
-            <tr><td>B</td><td>图片搜索 → 文本核验 → 正确</td><td>1</td><td>1</td><td>2</td><td>0.94</td></tr>
-            <tr><td>C</td><td>连续改写 7 次后正确</td><td>1</td><td>1</td><td>7</td><td>0.79</td></tr>
-            <tr><td>D</td><td>产生非法 JSON，修复失败</td><td>0</td><td>0</td><td>1</td><td>0.00</td></tr>
+            <tr><td>总是直接回答</td><td>训练题可被参数记忆解决，或搜索成本惩罚过重</td><td>search-required 数据比例与 reward</td></tr>
+            <tr><td>总搜整张图</td><td>没有派生图片状态，或局部搜索示例太少</td><td>image_id 链和 crop 轨迹</td></tr>
+            <tr><td>工具越调越多</td><td>缺少停止示例，最终奖励不关心成本</td><td>正确轨迹的平均步数与重复 query</td></tr>
+            <tr><td>偶发错误拖垮整条轨迹</td><td>没有区分可恢复错误与 fatal error</td><td>错误码、连续失败阈值和 token mask</td></tr>
           </tbody>
         </table></div>
 
-        <div class="warning"><strong>上表数字是教学示例，不是某篇论文的原始 reward。</strong>它说明一个设计事实：只奖励答案正确，模型不会主动学习少搜、搜准和遵守协议；但工具惩罚过重，又会把策略推向“不搜索直接猜”。</div>
+        <h2>这条轨迹到了训练阶段会变成什么</h2>
+        <p>做 SFT 时，完整轨迹会作为多轮样本送入模型，但通常只监督 assistant 生成的工具调用和最终答案。用户问题、工具返回的文字以及新图片都是条件，不应该让语言模型去“复述”。</p>
 
-        <div class="code-frame"><div class="code-head"><span class="code-file">reward.py · 一种可解释的组合</span><button class="copy-btn">复制</button></div><pre><code>def reward(episode, ground_truth):
-    r_answer = exact_or_judge(episode.answer, ground_truth)  # 0 或 1
-    r_format = float(episode.all_events_valid)
-    r_query = process_judge(episode.audit)                   # 0 到 1
-    tool_cost = 0.03 * episode.successful_tool_calls
+        <div class="code-frame"><div class="code-head"><span class="code-file">loss_mask.py</span><button class="copy-btn">复制</button></div><pre><code>IGNORE = -100
 
-    # 无效格式直接门控；正确性仍然是主信号。
-    return r_format * (0.8 * r_answer + 0.2 * r_query) - tool_cost
+def labels_for(turn, token_ids):
+    if turn.role == "assistant":
+        return token_ids
+    return [IGNORE] * len(token_ids)  # system / user / tool 全部只作条件</code></pre></div>
 
-def group_advantages(rewards):
-    mean = sum(rewards) / len(rewards)
-    std = (sum((r - mean) ** 2 for r in rewards) / len(rewards)) ** 0.5
-    return [(r - mean) / (std + 1e-6) for r in rewards]</code></pre></div>
+        <p>做 RL 时，起点更短：只有问题、图片、可用工具和可验证答案。中间轨迹由当前策略在线生成。于是同一道题会得到多条不同路线：直接猜、只做图片搜索、完整核验，或者因为格式错误提前结束。reward 决定哪类路线以后更常出现。</p>
+        <p>所以我更愿意把轨迹看成 Agent 的“可执行思路”，而不是一段很长的思维文本。它必须能被工具执行、能被日志还原，也能明确指出答案依据来自哪一步。只要这三点没有做好，后面的 SFT 或 RL 配置再漂亮，也很难知道模型究竟学到了什么。</p>
 
-        <h2>6. 长轨迹最麻烦的是失败以后怎么算 loss</h2>
-        <p>网页超时、图片下载失败和空检索结果属于可恢复错误。更危险的是 parser 连续失败、模型陷入重复调用，或上下文预算耗尽。此时“整条轨迹丢掉”会浪费前面有效的决策；“整条轨迹照常训练”又会把错误后的随机 token 当成有意义探索。</p>
-        <p>比较稳妥的做法是保存 fatal step：致命错误前的 prefix 仍可参与优势估计，之后的 token 不回传梯度。OpenSearch-VL 进一步对 fatal prefix 使用单边 advantage clamp，只保留正优势；Vision-DeepResearch 则把异常轨迹从反向传播中 mask，但仍留在组内优势计算中。</p>
-
-        <div class="code-frame"><div class="code-head"><span class="code-file">rollout_mask.py · 致命错误后的 token 不训练</span><button class="copy-btn">复制</button></div><pre><code>def make_policy_mask(token_steps, fatal_step=None):
-    mask = []
-    for step_id, token_count in token_steps:
-        trainable = fatal_step is None or step_id &lt; fatal_step
-        mask.extend([1 if trainable else 0] * token_count)
-    return mask
-
-def fatal_prefix_advantage(raw_advantage, is_fatal):
-    if not is_fatal:
-        return raw_advantage
-    return max(raw_advantage, 0.0)</code></pre></div>
-
-        <h2>7. 把 SFT 和 RL 放到一张表里</h2>
-        <div class="table-wrap"><table>
-          <thead><tr><th>问题</th><th>SFT</th><th>RL rollout</th></tr></thead>
-          <tbody>
-            <tr><td>数据里有什么</td><td>完整专家轨迹</td><td>问题、环境与可验证答案</td></tr>
-            <tr><td>中间动作从哪来</td><td>离线生成并过滤</td><td>当前策略在线采样</td></tr>
-            <tr><td>优化信号</td><td>assistant token 交叉熵</td><td>答案/格式/过程 reward 的相对优势</td></tr>
-            <tr><td>主要学什么</td><td>协议、工具用法、初始策略</td><td>搜索时机、查询质量、停止策略</td></tr>
-            <tr><td>典型风险</td><td>模仿生成器偏差</td><td>reward hacking、环境不稳定、rollout 昂贵</td></tr>
-          </tbody>
-        </table></div>
-
-        <p>因此，一个可工作的训练顺序通常是：先让少量、高质量 SFT 把输出空间限制到合法动作；再让 RL 在真实工具环境里探索“什么时候搜、搜什么、何时停”。MMSearch-R1 的特别之处在于它展示了简单双工具环境下可以跳过冷启动 SFT，直接用 GRPO 学出搜索行为；这不等于所有复杂 Harness 都不再需要 SFT。</p>
-
-        <h2>8. 我会怎样检查一个 DeepSearch 训练项目</h2>
-        <ol>
-          <li>先看 Harness：工具 schema、单轮动作数、图像 observation 如何回注、预算和终止条件。</li>
-          <li>再看样本：原始问题多少、生成多少轨迹、过滤后剩多少、是否过滤“无需搜索”的简单题。</li>
-          <li>确认 loss mask：user、tool 和 image token 是否被误监督。</li>
-          <li>确认 rollout：每题采样数、最大上下文、并发工具调用和失败恢复。</li>
-          <li>最后看 reward：答案信号是否压倒格式和成本，judge 是否真的能验证任务。</li>
-        </ol>
-        <div class="takeaway"><strong>我的判断：</strong>DeepSearch 的核心训练对象不是“知识”，而是证据不完整时的决策策略。SFT 定义它能做什么，Harness 定义它实际做了什么，RL 决定哪些行为以后更可能再次发生。</div>
-
-        <h2>参考资料</h2>
+        <h2>参考</h2>
         <ol class="references">
-          <li><a href="https://aclanthology.org/2026.acl-long.114/">MMSearch-R1: Incentivizing LMMs to Search</a></li>
-          <li><a href="https://arxiv.org/abs/2510.12801">DeepMMSearch-R1: Empowering Multimodal LLMs with Deep Search</a></li>
-          <li><a href="https://arxiv.org/abs/2601.22060">Vision-DeepResearch: Incentivizing DeepResearch Capability in Multimodal Large Language Models</a></li>
-          <li><a href="https://arxiv.org/abs/2605.05185">OpenSearch-VL: Towards Open-ended Multimodal Deep Research</a></li>
+          <li><a href="https://arxiv.org/abs/2605.05185">OpenSearch-VL</a>，附录中的 Kessock Bridge 搜索轨迹。</li>
+          <li><a href="https://aclanthology.org/2026.acl-long.114/">MMSearch-R1</a>，图片搜索与文本搜索的短轨迹环境。</li>
+          <li><a href="https://arxiv.org/abs/2510.12801">DeepMMSearch-R1</a>，整图、裁剪图与文本搜索协议。</li>
         </ol>
       </article>
     </div>

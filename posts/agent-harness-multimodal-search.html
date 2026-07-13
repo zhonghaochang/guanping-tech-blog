@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>多模态 DeepSearch 的训练路线｜常中豪</title>
-  <meta name="description" content="对照 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 与 OpenSearch-VL 的数据、工具、Harness 和训练配置。" />
+  <title>多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness｜常中豪</title>
+  <meta name="description" content="沿着 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 和 OpenSearch-VL，梳理多模态 DeepSearch 的数据、工具与训练路线。" />
   <meta name="theme-color" content="#f4f3d9" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/agent-harness-multimodal-search.html" />
   <meta property="og:locale" content="zh_CN" />
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="常中豪的技术博客" />
   <meta property="og:title" content="多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness" />
-  <meta property="og:description" content="逐项核对样本规模、训练设置、搜索工具、长轨迹 Harness 与失败处理。" />
+  <meta property="og:description" content="四篇工作不是简单堆工具，而是在逐步扩大模型能够探索的空间。" />
   <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/agent-harness-multimodal-search.html" />
   <meta property="article:published_time" content="2026-07-12" />
   <meta name="twitter:card" content="summary" />
   <link rel="icon" href="../assets/favicon.svg" />
-  <link rel="stylesheet" href="../assets/styles.css?v=3" />
+  <link rel="stylesheet" href="../assets/styles.css?v=4" />
 </head>
 <body>
   <div class="progress"></div>
@@ -33,235 +33,125 @@
       <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
       <div class="article-headline">
         <h1>多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness</h1>
-        <p class="article-deck">只看 benchmark 分数，很难判断一个系统到底学会了搜索，还是碰巧接上了更强的搜索服务。本文把四篇工作放进同一套坐标：数据怎样生成、模型看见什么 observation、工具如何执行、SFT/RL 怎样训练，以及长轨迹失败后如何处理。</p>
+        <p class="article-deck">我想弄清楚的不是哪篇论文分数最高，而是一个只会搜图、搜文字的模型，怎样一步步变成长轨迹、多工具的研究 Agent。</p>
       </div>
       <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 12 日</div>
     </header>
 
     <div class="article-layout">
       <article class="article">
-        <p>调研对象是 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 和 OpenSearch-VL。它们大致构成一条清楚的演进线：从两种搜索工具、最多几轮的短轨迹，走向七种工具、64K 上下文和 7 万 token response budget 的长程研究环境。</p>
-        <div class="warning"><strong>口径说明：</strong>本文数字以论文正文、附录与官方仓库为准。原始问题数、生成轨迹数、过滤后轨迹数和最终训练样本不是同一个口径，我会分别标出。论文没有披露的配置不做推测。</div>
+        <p>最近几篇多模态 DeepSearch 论文看起来很像：都是视觉语言模型，都会图片搜索和文本搜索，也都用到了 SFT 或 RL。把实验表放在一起却很难比较，因为它们训练的并不是同一种 Agent。</p>
+        <p>MMSearch-R1 的环境只有两种搜索工具，轨迹很短，主要研究“模型能不能自己决定要不要搜”。到了 OpenSearch-VL，动作空间已经包含裁剪、OCR、超分、透视矫正和两种检索，单条 rollout 可以有 7 万个 response tokens。中间的 DeepMMSearch-R1 和 Vision-DeepResearch，刚好把这条演进路线连接起来。</p>
+        <p>所以这篇文章不按发布时间罗列摘要，而是沿着三个问题读：训练数据怎样从问题变成轨迹，工具环境扩大以后模型怎样冷启动，以及长轨迹如何不被真实搜索服务拖垮。</p>
 
-        <h2>1. 先看结论：差异主要不在模型，而在环境</h2>
+        <h2>先把四篇工作放在一张表里</h2>
         <div class="table-wrap"><table>
-          <thead><tr><th>工作</th><th>基础模型</th><th>SFT</th><th>RL</th><th>工具规模</th><th>典型轨迹上限</th></tr></thead>
+          <thead><tr><th>工作</th><th>它主要解决什么</th><th>训练数据</th><th>Agent 能做什么</th></tr></thead>
           <tbody>
-            <tr><td>MMSearch-R1</td><td>Qwen2.5-VL-7B-Instruct</td><td>主方案无；另做 8K 对照</td><td>约 5K FVQA</td><td>图片 + 文本搜索</td><td>正文称 3 轮、最多 2 次搜索</td></tr>
-            <tr><td>DeepMMSearch-R1</td><td>Qwen2.5-VL-7B-Instruct</td><td>10K</td><td>约 5K FVQA</td><td>全文/裁剪图搜 + 文搜</td><td>最多 10 次工具调用</td></tr>
-            <tr><td>Vision-DeepResearch</td><td>Qwen3-VL-8B / 30B-A3B</td><td>30K</td><td>15K</td><td>视觉搜索 + 网页 + Python</td><td>50 轮、64K context</td></tr>
-            <tr><td>OpenSearch-VL</td><td>Qwen3-VL-8B / 30B-A3B / 32B</td><td>36,592</td><td>8K</td><td>7 种工具</td><td>70K response tokens</td></tr>
+            <tr><td>MMSearch-R1</td><td>不用 SFT，RL 能否学会按需搜索</td><td>约 5K RL；另有 8K SFT 对照</td><td>图片搜索、文本搜索；短轨迹</td></tr>
+            <tr><td>DeepMMSearch-R1</td><td>先用专家轨迹教会局部图搜和多轮查询</td><td>10K SFT + 约 5K RL</td><td>整图/裁剪图搜索，多次文本搜索</td></tr>
+            <tr><td>Vision-DeepResearch</td><td>把视觉定位接到长程文本研究能力上</td><td>30K SFT + 15K RL</td><td>多尺度裁剪、视觉检索、网页访问、Python</td></tr>
+            <tr><td>OpenSearch-VL</td><td>开放多工具训练配方，并处理长轨迹失败</td><td>36,592 SFT + 8K RL</td><td>7 种工具，主动改善图片再检索</td></tr>
           </tbody>
         </table></div>
+        <p>这张表里最重要的不是样本数从 5K 涨到 36K，而是 action space 变了。动作只有“搜图还是搜文字”时，RL 很容易探索；动作变成七种之后，模型连第一步应该裁剪还是 OCR 都要学，冷启动的难度完全不同。</p>
 
-        <p>真正决定难度的，是 action space 和 observation space。只有文本搜索时，模型主要学习 query 改写；加入图片搜索和裁剪后，它还要选择视觉区域；再加入超分、透视矫正和 OCR，模型必须判断“当前失败是实体未知，还是像素质量不够”。工具越多，SFT 冷启动越重要，Harness 的状态管理也越难。</p>
+        <h2>MMSearch-R1：先回答“什么时候应该搜”</h2>
+        <p>MMSearch-R1 用 Qwen2.5-VL-7B-Instruct 做基础模型，主实验没有先做 SFT，直接在真实图片搜索和文本搜索环境里跑 GRPO。它的设计很克制：图片搜索只能放在前面，正文描述每条 rollout 最多 3 个对话轮次、最多 2 次搜索，然后必须回答。</p>
+        <p>数据构造的几个数字容易混在一起。作者先随机取 10,000 个视觉概念，自动生成 6,000 条 visual-concept VQA，其中 5,400 条训练、600 条测试；再加入 7,000 条 InfoSeek 文本知识样本和 800 条人工样本。经过 search balancing 后，真正用于 RL 的 FVQA-train 约 5,000 条，其中 3,400 条需要搜索，1,600 条不需要搜索。</p>
+        <p>“不需要搜索”的 1,600 条并不是凑数。训练集如果全是 search-required，模型最容易学到的策略就是每题都搜。MMSearch-R1 的 reward 也在约束这件事：答对是主信号，答对但使用搜索会被施加搜索惩罚，格式 reward 权重为 0.1。</p>
 
-        <h2>2. MMSearch-R1：先证明“不做 SFT 也能学会搜”</h2>
-        <p>MMSearch-R1 的核心实验很克制：Qwen2.5-VL-7B-Instruct 在简单的图片搜索和文本搜索环境中直接做 GRPO，不依赖冷启动 SFT。它想回答的不是“能否建一个最强系统”，而是“纯 RL 能否从答案奖励里涌现主动搜索行为”。</p>
-
-        <h3>数据是怎样凑成约 5K 的</h3>
-        <ul>
-          <li>先从 10K visual concepts 构造 6,000 条自动视觉概念数据，其中 5,400 条训练、600 条测试。</li>
-          <li>加入 7,000 条 InfoSeek textual-knowledge 样本，以及 800 条人工数据。</li>
-          <li>经过搜索需求平衡后，FVQA-train 约 5,000 条：3,400 条必须搜索，1,600 条无需搜索。</li>
-          <li>测试集 1,800 条，来自三个来源，每个来源 600 条。</li>
-        </ul>
-        <p>这里的 10K、6K、7K 和 5K 属于不同阶段。论文最终用于 RL 的并不是它们简单相加，而是经过任务构造和 search balancing 的 FVQA 训练集。</p>
-
-        <h3>工具和 Harness</h3>
-        <p>官方仓库的图片搜索用 SerpAPI，返回前 5 个图片匹配及其页面；文本搜索同样从 SerpAPI 取前 5 个结果，再用 Jina Reader 读取网页，最后由 Qwen3-32B 生成聚焦查询的摘要。协议采用专用标签：</p>
-        <div class="code-frame"><div class="code-head"><span class="code-file">MMSearch-R1 · action protocol</span><button class="copy-btn">复制</button></div><pre><code>&lt;reason&gt;需要先确认图中实体。&lt;/reason&gt;
+        <div class="code-frame"><div class="code-head"><span class="code-file">MMSearch-R1 的短协议</span><button class="copy-btn">复制</button></div><pre><code>&lt;reason&gt;图像里没有足够信息，需要先确认实体。&lt;/reason&gt;
 &lt;search&gt;&lt;img&gt;&lt;/search&gt;
 
-&lt;information&gt;图片候选与对应页面……&lt;/information&gt;
+&lt;information&gt;前 5 个图片匹配与网页标题……&lt;/information&gt;
 
-&lt;reason&gt;实体已确定，继续核验属性。&lt;/reason&gt;
+&lt;reason&gt;实体已确定，还需要核验属性。&lt;/reason&gt;
 &lt;text_search&gt;entity attribute&lt;/text_search&gt;
 
 &lt;answer&gt;最终答案&lt;/answer&gt;</code></pre></div>
-        <p>正文写的是每条 rollout 最多 3 个对话轮次、最多 2 次搜索，第三轮给答案，而且图片搜索只能在第一轮使用。附录 F.1 又写“每条 rollout 最多 3 次工具调用”。这是论文内部的表述差异；实现复现时应以代码中的环境上限为准，不能只摘一处文字。</p>
 
-        <h3>RL 与 SFT 对照配置</h3>
-        <ul>
-          <li>RL：veRL + GRPO；每 step batch 512，每题 8 个 rollouts。</li>
-          <li>硬件：4 个节点、每节点 8 张 H100，共 32 张 GPU。</li>
-          <li>学习率 2e-6，KL β=0.001，clip=0.2；论文报告约在第 50 step 收敛。</li>
-          <li>reward：字符串精确匹配为主；答对但使用搜索会乘以 0.1 的惩罚因子；格式项权重 α=0.1。</li>
-        </ul>
-        <p>为了比较 SFT，作者还让 GPT-4o 生成 13.2K 条轨迹，过滤掉 5.2K 条答案错误轨迹，得到 8K。Qwen2.5-VL-7B 用 LLaMA-Factory 在 8 张 H100 上训练 1 epoch，学习率 1e-5，cosine schedule，10% warmup；prompt 和工具返回被 mask。</p>
-        <div class="takeaway"><strong>我的判断：</strong>MMSearch-R1 证明的是“小 action space 下 RL 可以从零学会是否搜索”。当工具增加到裁剪、OCR、网页访问和图像增强时，纯 RL 的探索空间会快速膨胀，这个结论不能直接外推。</div>
+        <p>官方实现里，图片检索和文本检索都以 SerpAPI 为入口；文本结果再通过 Jina Reader 读取网页，由 Qwen3-32B 压成和 query 有关的短摘要。RL 每个 prompt 采样 8 条轨迹，batch 512，在 4×8 张 H100 上训练，学习率 2e-6，KL 系数 0.001，clip ratio 0.2。</p>
+        <p>论文另外做了一个 SFT 对照：GPT-4o 生成 13.2K 条轨迹，过滤掉 5.2K 条错答后剩 8K。这个对照有意思的地方是，RL 的 5K 并不比 SFT 的 8K 大，却学到了更节制的搜索行为。这里比较的其实是“模仿一条既定路线”和“在环境里试出路线”的区别。</p>
 
-        <h2>3. DeepMMSearch-R1：用 10K SFT 轨迹解决多工具冷启动</h2>
-        <p>DeepMMSearch-R1 仍以 Qwen2.5-VL-7B-Instruct 为基础，但把“识别哪里需要搜”和“怎样进行多步图文搜索”先写进 SFT，再用 RL 优化。它的数据漏斗比最终的 10K 更值得关注。</p>
+        <h2>DeepMMSearch-R1：为什么又把 SFT 加了回来</h2>
+        <p>DeepMMSearch-R1 还是 Qwen2.5-VL-7B-Instruct，但搜索动作多了一层：模型可以搜整张图，也可以先用 referring expression 指定局部实体。Harness 用 GroundingDINO 找到 bounding box，裁剪以后再做图片搜索。模型不只决定“搜不搜”，还要决定“搜哪一块”。</p>
+        <p>这时直接靠 RL 探索就贵了。作者先从 InfoSeek 随机取 200,000 个问题，让 Gemini-2.5-Pro 在真实工具环境里生成多轮轨迹。最终答案必须和 ground truth 一致，才会留下；这一步剩约 47,000 条。再按知识类型平衡成 10,000 条 SFT 数据，search-required 和 search-free 各占一半。</p>
+        <p>这 10K 并不都是长链。1 到 6 轮的样本数分别是 5000、3289、1455、184、58、14；工具调用中，文本搜索占 68.9%，整图搜索 13.5%，裁剪图搜索 17.6%。从分布上看，SFT 主要在教模型“第一步别选错”，而不是让它模仿几十轮研究。</p>
+        <p>SFT 只在语言模型上加 LoRA（rank 8），视觉编码器和 projector 都冻结；训练 3 epochs，学习率 1e-4，使用 1×8 张 H100，global batch 8。工具返回不计算 loss。RL 阶段允许一次图片或裁剪图搜索、多个文本搜索，总工具调用不超过 10，每题采样 8 条 rollout。</p>
+        <div class="warning"><strong>复现时需要注意一个论文内部的不一致：</strong>正文写 RL 训练 30 epochs、batch 512；附录写 20 epochs、batch 256。两处都写了 4×8 张 H100、8 rollouts、45-step warmup。文章和附录都能在当前 PDF 中找到，我没有替作者选其中一组。</div>
 
-        <h3>从 20 万问题到 1 万训练轨迹</h3>
-        <ol>
-          <li>从 InfoSeek 随机选择 200,000 个问题。</li>
-          <li>让 Gemini-2.5-Pro 在真实工具环境中生成多轮、带工具标签的轨迹。</li>
-          <li>只保留最终预测与 ground truth 一致的约 47,000 条。</li>
-          <li>按任务 taxonomy 平衡，得到 10,000 条 SFT 数据，并让 search-required 与 search-free 各占一半。</li>
-        </ol>
-        <p>最终 10K 中，轮次数分布非常偏：1/2/3/4/5/6 轮分别为 5000、3289、1455、184、58、14。工具占比为文本搜索 68.9%、整图搜索 13.5%、裁剪图搜索 17.6%。换句话说，长轨迹很少，模型首先学到的是“少量步骤内正确选工具”。</p>
+        <h2>Vision-DeepResearch：轨迹一长，问题就不只在模型里</h2>
+        <p>Vision-DeepResearch 把基础模型换成 Qwen3-VL-8B-Instruct 和 Qwen3-VL-30B-A3B-Instruct。它没有继续给图片搜索增加更多标签，而是想办法把视觉阶段接到已经成熟的文本 DeepResearch 能力上。</p>
+        <p>数据生成先让多模态模型在图片上做多实体、多尺度裁剪和搜索。找到候选页面后，辅助模型把长网页总结成和当前图片区域有关的证据。视觉实体基本确定以后，再把图片写成详细描述，交给文本 DeepResearch 模型继续网页搜索、访问、总结和 Python 推理。</p>
 
-        <h3>图片搜索不只是把整张图发出去</h3>
-        <p>它支持整图和 referring expression 两种入口。若模型指定局部实体，Harness 先用 GroundingDINO 得到 bounding box 并裁剪，再把局部图送到内部图片搜索；前 5 个结果由 GPT-5-chat-latest 汇总。文本搜索从内部 web index 取前 5 个结果，也由 GPT-5-chat-latest 汇总。</p>
-        <div class="code-frame"><div class="code-head"><span class="code-file">DeepMMSearch-R1 · 三类动作</span><button class="copy-btn">复制</button></div><pre><code>&lt;img_search&gt;whole image&lt;/img_search&gt;
-
-&lt;img_search&gt;the red emblem on the upper-left corner&lt;/img_search&gt;
-
-&lt;text_search&gt;identified entity founding date&lt;/text_search&gt;</code></pre></div>
-        <p>环境限制为最多一次整图或裁剪图搜索，可以做多次文本搜索，总工具调用不超过 10 次。这个限制本身就是策略先验：视觉搜索负责锁定实体，文本搜索负责核验知识。</p>
-
-        <h3>SFT 和 RL 配置</h3>
-        <div class="table-wrap"><table>
-          <thead><tr><th>阶段</th><th>配置</th><th>loss / reward</th></tr></thead>
-          <tbody>
-            <tr><td>SFT</td><td>LoRA rank 8；仅 LLM；vision encoder 与 projector 冻结；3 epochs；lr 1e-4；bf16；1×8 H100；global batch 8</td><td>工具 observation mask，不计算 token loss</td></tr>
-            <tr><td>RL</td><td>veRL + GRPO；8 rollouts；4×8 H100；KL 0.001；clip 0.2；max response 8192</td><td>GPT-5-chat-latest 作 reward judge；format 权重 0.1</td></tr>
-          </tbody>
-        </table></div>
-        <p>论文的 RL 超参数有一处必须保留的矛盾：正文第 4.1 节写 30 epochs、batch 512、学习率在前 45 step warmup 到 2e-6；附录 D 写 20 epochs、batch 256。两处都写了 4×8 H100 和每题 8 rollouts。没有代码或作者说明时，不能把其中一组包装成唯一事实。</p>
-
-        <h2>4. Vision-DeepResearch：把轨迹拉到 50 轮和 64K</h2>
-        <p>Vision-DeepResearch 使用 Qwen3-VL-8B-Instruct 与 Qwen3-VL-30B-A3B-Instruct，目标从“找一个实体”进一步扩展到长程视觉研究。它的突出点有两个：把视觉搜索轨迹桥接到成熟的文本 DeepResearch 模型，以及用异步调度解决真实工具 rollout 的吞吐问题。</p>
-
-        <h3>30K SFT + 15K RL</h3>
-        <ul>
-          <li>SFT 共 30K：16K verified factual VQA、8K text-only QA、6K fuzzy VQA。</li>
-          <li>RL 共 15K 高质量 VQA：10K 过滤后的现有数据 + 5K fuzzy VQA。</li>
-          <li>RL 使用真实在线视觉搜索、文本搜索和网页访问，最长 50 轮，context 64K，每轮 response 最多 4K。</li>
-          <li>reward 是纯准确率信号，由 LLM judge 输出 1 或 0。</li>
-        </ul>
-
-        <p>数据生成先让多模态模型进行多实体、多尺度 crop/search：图片搜索后访问网站，再由辅助 MLLM 汇总网页；外部 judge 判断是否命中。随后把图片转成详细文字描述，将已经定位的实体和证据交给文本 DeepResearch foundation model，继续网页搜索、访问、总结或运行 Python。最后用 rejection sampling 验证答案。</p>
-
-        <div class="code-frame"><div class="code-head"><span class="code-file">Vision-DeepResearch · 数据桥接的抽象</span><button class="copy-btn">复制</button></div><pre><code>visual_prefix = multimodal_agent.run(
-    image=image,
-    tools=[crop, image_search, website_visit, webpage_summary],
-)
-
-text_state = {
+        <div class="code-frame"><div class="code-head"><span class="code-file">视觉阶段怎样接到文本研究阶段</span><button class="copy-btn">复制</button></div><pre><code>visual_state = {
     "question": question,
-    "image_description": describe(image),
-    "identified_entities": visual_prefix.entities,
-    "evidence": visual_prefix.evidence,
+    "image_description": describe(original_image),
+    "identified_entities": ["..."],
+    "visual_evidence": ["crop_2 matched page_x", "..."],
 }
 
-full_trace = text_deepresearch_agent.continue_run(
-    state=text_state,
-    tools=[web_search, website_visit, webpage_summary, python],
-)
+text_agent.run(
+    state=visual_state,
+    tools=[web_search, visit_page, summarize_page, python],
+)</code></pre></div>
 
-keep = answer_judge(full_trace.answer, ground_truth)</code></pre></div>
+        <p>SFT 一共 30K：16K verified factual VQA 轨迹、8K text-only QA 轨迹、6K fuzzy VQA 轨迹。加入 text-only 数据并不是偏题，它在补长程搜索和网页阅读，而视觉前缀负责告诉文本 Agent 当前实体和证据是什么。RL 使用 15K VQA，其中 10K 来自过滤后的现有数据，5K 是 fuzzy VQA。</p>
+        <p>这一阶段，单条 rollout 可以到 50 轮，context 64K，每轮 response 最多 4K。同步 rollout 会让所有 GPU 等最慢的网页请求，所以论文使用队列式异步调度器和工具池，让生成、搜索和网页访问错开执行，并报告了超过 10 倍的吞吐提升。</p>
+        <p>长轨迹也引入了很实际的坏状态：模型重复生成、工具格式连续错误、上下文耗尽。论文用 n-gram 检测重复；连续 3 次格式或工具错误就终止。异常轨迹不参与反向传播，但仍留在组内 advantage 计算里。到这里，Harness 已经不是“给模型接几个 API”，而是训练稳定性的一部分。</p>
+        <p>这篇论文披露了数据规模、轮次和上下文设置，但没有在 PDF 中给出完整的 GPU 数量与学习率。我宁愿把这一栏留空，也不从相邻工作推一个看起来合理的数字。</p>
 
-        <h3>异步 Harness 与异常轨迹</h3>
-        <p>同步 rollout 会让所有 GPU 等最慢的网页。论文采用类似 rLLM 的队列调度器和工具池，让模型生成、工具调用和 observation 回注异步推进，并允许多个 crop 请求并行；报告吞吐超过同步方案 10 倍。</p>
-        <p>稳定性处理也更像生产系统：n-gram 重复检测；连续 3 次格式或工具错误后终止；单次错误则返回明确 observation 允许重试。超过预算、重复或错误步数超过一半的异常轨迹，不参与反向传播，但仍保留在 advantage 计算中。64K 上下文下 FP16 容易 overflow，因此使用 BF16。</p>
-        <div class="note"><strong>没有披露的部分：</strong>论文 PDF 没有给出完整的 GPU 数量、学习率等训练配置。能够确认的是数据规模、50 轮、64K context、4K 单轮 response、纯准确率 reward 和异步 rollout 设计；其余不应补写。</div>
-        <p>工具组合的消融很直观：Direct 平均 12.0；整图搜索 WIS 16.0；WIS + 文搜 29.3；裁剪图搜 CIS 23.0；CIS + 文搜达到 40.0。这说明视觉定位和文本核验不是替代关系，而是两段互补过程。</p>
-
-        <h2>5. OpenSearch-VL：七种工具与可追踪的视觉状态</h2>
-        <p>OpenSearch-VL 把多模态 DeepSearch 做成了更完整的开放环境。基础模型包括 Qwen3-VL-8B-Instruct、30B-A3B-Instruct 和 32B-Instruct，工具不只负责找信息，也负责改善“可看见性”。</p>
-
+        <h2>OpenSearch-VL：让模型先把图片变得可搜索</h2>
+        <p>OpenSearch-VL 的变化最直观：工具从“找外部知识”扩展到“改善当前观察”。它提供 7 种工具：</p>
         <div class="table-wrap"><table>
-          <thead><tr><th>工具</th><th>后端实现</th><th>解决的问题</th></tr></thead>
+          <thead><tr><th>工具</th><th>实现</th><th>模型为什么会用它</th></tr></thead>
           <tbody>
-            <tr><td>TextSearch</td><td>Serper top-k → Jina Reader → Qwen3-32B 生成每篇 2–4 句摘要</td><td>查实体属性和网页证据</td></tr>
-            <tr><td>ImageSearch</td><td>Polaris Lens API</td><td>由公开图片 URL 找相似图片、实体、页面与 caption</td></tr>
-            <tr><td>Sharpen</td><td>OpenCV unsharp mask</td><td>增强轻微模糊边缘</td></tr>
-            <tr><td>SuperResolution</td><td>OpenCV dnn_superres + EDSR，失败回退原图</td><td>放大低分辨率局部</td></tr>
-            <tr><td>PerspectiveCorrect</td><td>Canny → 最大四边形 → 四点变换</td><td>校正文档、招牌透视</td></tr>
-            <tr><td>Crop</td><td>确定性裁剪并保存到磁盘</td><td>创建可复用的局部视觉状态</td></tr>
-            <tr><td>OCR</td><td>远程 PaddleX layout-aware parsing</td><td>读取复杂版式文字</td></tr>
+            <tr><td>TextSearch</td><td>Serper → Jina Reader → Qwen3-32B 摘要</td><td>查实体属性和网页证据</td></tr>
+            <tr><td>ImageSearch</td><td>Polaris Lens API</td><td>从图片定位实体和相关页面</td></tr>
+            <tr><td>Crop</td><td>本地确定性裁剪</td><td>把注意力放到局部目标</td></tr>
+            <tr><td>OCR</td><td>PaddleX 版面解析</td><td>读取标牌和文档文字</td></tr>
+            <tr><td>Sharpen</td><td>OpenCV unsharp mask</td><td>处理轻微模糊</td></tr>
+            <tr><td>SuperResolution</td><td>EDSR</td><td>放大小目标</td></tr>
+            <tr><td>PerspectiveCorrect</td><td>边缘检测与四点变换</td><td>校正倾斜招牌或页面</td></tr>
           </tbody>
         </table></div>
 
-        <h3>Harness 的关键不是 schema，而是 active visual context</h3>
-        <p>工具用 OpenAI 风格 function schema 注入 <code>&lt;tools&gt;</code>，每轮恰好输出一个 <code>&lt;tool_call&gt;</code> JSON。特别重要的是视觉上下文单调增长：原图、裁剪图、超分图和透视矫正图都保留引用，后面的工具可以继续操作某张派生图，而不是每轮回到原图。</p>
+        <p>这一套工具要求 Harness 维护 active visual context。原图经过裁剪、超分和透视矫正后，每张派生图都要有稳定 ID 和父子关系；否则后面的 OCR 不知道应该读哪张图。</p>
 
-        <div class="code-frame"><div class="code-head"><span class="code-file">visual_state.json · 派生图片可继续被引用</span><button class="copy-btn">复制</button></div><pre><code>{
-  "active_visual_context": [
-    {"image_id": "img_0", "path": "question.jpg", "parent": null},
-    {"image_id": "img_1", "path": "crop_001.jpg", "parent": "img_0",
-     "operation": {"name": "Crop", "box": [420, 90, 980, 530]}},
-    {"image_id": "img_2", "path": "sr_001.png", "parent": "img_1",
-     "operation": {"name": "SuperResolution", "scale": 4}}
-  ],
-  "next_action": {
-    "name": "OCR",
-    "arguments": {"image_id": "img_2"}
-  }
-}</code></pre></div>
-        <p>文本和 OCR observation 只作条件并被 loss mask；图片 observation 同样不承担 token loss，但会通过视觉编码器进入后续上下文。这正是多模态 Harness 和纯文本 Agent 最大的结构差异。</p>
+        <div class="code-frame"><div class="code-head"><span class="code-file">active_visual_context.json</span><button class="copy-btn">复制</button></div><pre><code>[
+  {"image_id": "img_0", "parent": null, "path": "question.jpg"},
+  {"image_id": "img_1", "parent": "img_0",
+   "operation": {"name": "Crop", "box": [420, 90, 980, 530]}},
+  {"image_id": "img_2", "parent": "img_1",
+   "operation": {"name": "SuperResolution", "scale": 4}}
+]</code></pre></div>
 
-        <h3>36,592 条专家轨迹是怎样来的</h3>
-        <ul>
-          <li>从 Wikipedia 构造长度 h∈{2,3,4} 的实体路径，并进行 fuzzy entity rewriting 和 source-anchor grounding。</li>
-          <li>合并 LiveVQA、FVQA 与 WebQA；用 Qwen3-VL-32B 过滤无需工具即可回答，以及只做一次 ImageSearch 就能回答的简单题。</li>
-          <li>随机退化 10% 图片，迫使轨迹使用图像增强工具。</li>
-          <li>Claude Opus 4.6 在真实工具环境中每题独立采样 K=5 条轨迹。</li>
-          <li>先由 GPT-4o 判断答案，再由 GPT-5.4 判断过程和工具使用，最终保留 36,592 条，平均 6.3 个工具轮次。</li>
-        </ul>
+        <p>训练数据也专门为这些工具服务。问题来自 Wikipedia 实体路径以及 LiveVQA、FVQA、WebQA，先过滤无需工具就能答对、或一次图片搜索就能答对的题；再把 10% 图片做模糊、降采样和透视变形。Claude Opus 4.6 在真实环境里每题采样 5 条专家轨迹，GPT-4o 判断答案，GPT-5.4 判断过程，最后得到 36,592 条 SFT 轨迹，平均 6.3 次工具调用。</p>
+        <p>SFT 是全参数训练，视觉塔和 projector 都不冻结：32K cutoff、8 epochs、学习率 2e-5、effective batch 256，使用 256 张 H20。RL 数据是和 SFT 不重叠的 8K VQA；64 张 H20 上运行异步 rollout，8B 每题采样 8 条，30B 每题 16 条，最大 response 长度 70,000 tokens，同时允许 256 个任务和 2,048 个工具调用并行。</p>
+        <p>真实工具环境最棘手的不是某一次搜索为空，而是错误会沿着轨迹传播。OpenSearch-VL 把连续 3 次工具错误定义为 fatal：fatal 之后的 token 不计算策略梯度；fatal 之前的有效 prefix 仍留着，并对负 advantage 做单边截断。这样既不必丢掉整条长轨迹，也不会让模型学习错误后的随机输出。</p>
 
-        <h3>SFT 与 RL 的工程规模</h3>
-        <div class="table-wrap"><table>
-          <thead><tr><th>阶段</th><th>数据与序列</th><th>训练配置</th></tr></thead>
-          <tbody>
-            <tr><td>SFT</td><td>36,592；cutoff 32K；8 epochs</td><td>全参数；vision tower/projector 均不冻结；ZeRO-3；bf16；256 GPU（32×8）；effective batch 256；lr 2e-5；warmup 0.1</td></tr>
-            <tr><td>RL</td><td>8K，与 SFT VQA 不重叠；prompt 4096；response 最多 70,000 tokens</td><td>64 GPU（8×8）；SGLang async；actor lr 1e-6；clip high 0.28；KL 1e-3；256 并行任务、2048 并行工具调用</td></tr>
-          </tbody>
-        </table></div>
-        <p>RL 采用 RLOO within GRPO。每题采样数 8B 为 8、30B 为 16，temperature 0.7；8B 训练 100 epochs，30B 训练 5 epochs。Megatron-LM 侧使用 TP4、PP2，context parallel 为 8B 的 CP8 / 30B 的 CP4，MoE 还使用 EP8、ETP1。</p>
-        <p>reward 写成：</p>
-        <div class="code-frame"><div class="code-head"><span class="code-file">OpenSearch-VL · reward 结构</span><button class="copy-btn">复制</button></div><pre><code>reward = r_format * (0.8 * r_accuracy + 0.2 * r_query)
-
-# r_format: 确定性协议校验
-# r_accuracy: GPT-4o 判断最终答案
-# r_query: GPT-5.4 判断查询和工具过程</code></pre></div>
-        <p>连续 3 次工具错误被判 fatal。fatal 之后的 token 被 mask；fatal prefix 的 advantage 用 <code>max(advantage, 0)</code> 做单边截断，避免模型因为环境尾部错误而负向学习此前仍合理的动作。</p>
-
-        <h2>6. 四篇工作的数据规模不能横着直接比</h2>
-        <div class="table-wrap"><table>
-          <thead><tr><th>工作</th><th>候选/原始池</th><th>生成或验证后</th><th>最终 SFT</th><th>最终 RL</th></tr></thead>
-          <tbody>
-            <tr><td>MMSearch-R1</td><td>10K concepts + 7K InfoSeek + 800 manual</td><td>SFT 对照生成 13.2K，过滤错答 5.2K</td><td>主方案无；对照 8K</td><td>约 5K</td></tr>
-            <tr><td>DeepMMSearch-R1</td><td>200K InfoSeek</td><td>约 47K 答案正确轨迹</td><td>平衡后 10K</td><td>约 5K</td></tr>
-            <tr><td>Vision-DeepResearch</td><td>未给统一原始池口径</td><td>经多阶段生成与 rejection sampling</td><td>30K</td><td>15K</td></tr>
-            <tr><td>OpenSearch-VL</td><td>Wikipedia 路径 + 3 个 VQA 源</td><td>每题 K=5 专家 rollouts + 两级 judge</td><td>36,592</td><td>8K disjoint</td></tr>
-          </tbody>
-        </table></div>
-        <p>我更关心“每条留下来的轨迹经历了什么”。如果只报最终 36K，很容易忽略它背后的五次真实环境 rollout、答案 judge、过程 judge 和难度过滤；这些步骤往往比把 SFT 从 30K 扩到 40K 更影响策略质量。</p>
-
-        <h2>7. 训练路线真正发生了哪些变化</h2>
-
-        <h3>变化一：从“会不会搜”转向“先修图还是先搜”</h3>
-        <p>MMSearch-R1 的动作空间很小，答案奖励足以诱发搜索。OpenSearch-VL 的动作空间包含增强、几何变换、OCR、图搜和文搜。此时错误工具选择会改变后续可见状态，仅靠最终答案做稀疏探索非常困难，所以需要专家轨迹先建立 action prior。</p>
-
-        <h3>变化二：observation 从文本变成可累积的视觉状态</h3>
-        <p>裁剪图、超分图不应只是一次性的 tool output，而要有稳定 ID、父子关系和磁盘生命周期。否则模型看到“img_2”时，Harness 无法知道它源自哪次操作，训练复盘也无法定位错误。</p>
-
-        <h3>变化三：同步训练变成分布式在线系统</h3>
-        <p>70K response、2048 个并行工具调用意味着瓶颈不再只是 GPU。DNS、网页读取、图片下载、OCR 服务、缓存命中和第三方 API 限流都会影响 rollout 分布。论文里的“64 张 GPU”并不能完整表示实验成本。</p>
-
-        <h3>变化四：失败处理开始进入优化目标</h3>
-        <p>短轨迹里失败可以整条丢弃；50 轮轨迹里这样做会浪费大量有效 prefix。于是出现 abnormal trajectory mask、fatal token mask、连续错误阈值和单边 advantage clamp。它们不是边角工程，而是训练算法的一部分。</p>
-
-        <h2>8. 如果从零复现，我会选哪条路线</h2>
+        <h2>把这条路线重新画一遍</h2>
+        <p>读完四篇论文，我觉得路线并不是简单的“工具越来越多、上下文越来越长”，而是下面四步：</p>
         <ol>
-          <li><strong>先做两工具闭环。</strong>文本搜索 + 图片搜索，单次动作，最多 4–6 步，先确认 parser、缓存、日志和评测稳定。</li>
-          <li><strong>做 5K–10K 高质量 SFT。</strong>过滤无需搜索的题，tool observation 全部 mask；保留每步 audit。</li>
-          <li><strong>再加局部视觉工具。</strong>先 Crop，再加 OCR；每个派生图使用稳定 image_id 和 parent。</li>
-          <li><strong>最后做在线 RL。</strong>每题多 rollout，先用答案 + 格式 reward，再谨慎加入过程 judge 和工具成本。</li>
-          <li><strong>把 Harness 指标纳入实验。</strong>除了准确率，还记录平均工具数、空结果率、超时率、fatal rate、上下文长度和每题真实成本。</li>
+          <li><strong>先让模型学会按需搜索。</strong>MMSearch-R1 用 search-balanced 数据和搜索惩罚，解决“每题都搜”的坏习惯。</li>
+          <li><strong>再把视觉定位变成一个动作。</strong>DeepMMSearch-R1 加入裁剪图搜索，SFT 用来降低更大动作空间的探索成本。</li>
+          <li><strong>把视觉前缀接到长程文本研究。</strong>Vision-DeepResearch 借用文本 Agent 的网页搜索和推理能力，重点转向异步 Harness。</li>
+          <li><strong>让模型主动修复观察。</strong>OpenSearch-VL 加入图像增强和 OCR，同时用 visual state 与 fatal-aware RL 管住长轨迹。</li>
         </ol>
-        <div class="takeaway"><strong>我的判断：</strong>多模态 DeepSearch 的提升，不只是“模型推理更长”。它来自训练数据、搜索后端、视觉状态管理和 rollout 系统的共同扩展。论文对比时，必须把 Harness 当成模型能力的一部分来读。</div>
+        <p>这也解释了为什么“更多 RL”不是统一答案。两工具、三轮对话的环境可以直接探索；七工具、几十轮的环境如果没有 SFT 起点和稳定 Harness，大部分算力会消耗在非法动作、服务超时和重复搜索上。</p>
 
-        <h2>参考资料与官方实现</h2>
+        <h2>如果自己做一个最小复现</h2>
+        <p>我会从 MMSearch-R1 的小环境开始，只保留图片搜索和文本搜索，并把“无需搜索”的问题明确混进训练集。等到查询、停止和日志都稳定，再加 Crop，让每张派生图有自己的 image_id。</p>
+        <p>OCR 和图像增强应该最后加。它们不仅增加工具数量，还会改变 observation 的形态。每加一个工具，都要重新检查三个指标：它是否真的带来新证据，失败后能否恢复，以及模型有没有把它当成固定前置动作。</p>
+        <p>真正进入长轨迹 RL 前，我还会先记录搜索空结果率、网页超时率、平均工具数、重复 query 比例、fatal rate 和每题成本。没有这些数据，只看最终准确率，很难分辨提升来自模型策略，还是来自某个更强、更慢的搜索后端。</p>
+
+        <h2>论文与代码</h2>
         <ol class="references">
-          <li><a href="https://aclanthology.org/2026.acl-long.114/">MMSearch-R1: Incentivizing LMMs to Search</a>；<a href="https://github.com/EvolvingLMMs-Lab/multimodal-search-r1">官方仓库</a></li>
-          <li><a href="https://arxiv.org/abs/2510.12801">DeepMMSearch-R1: Empowering Multimodal LLMs with Deep Search</a>；<a href="https://machinelearning.apple.com/research/r1">Apple Machine Learning Research</a></li>
-          <li><a href="https://arxiv.org/abs/2601.22060">Vision-DeepResearch</a>；<a href="https://github.com/Osilly/Vision-DeepResearch">官方仓库</a></li>
-          <li><a href="https://arxiv.org/abs/2605.05185">OpenSearch-VL: Towards Open-ended Multimodal Deep Research</a>；<a href="https://github.com/shawn0728/OpenSearch-VL">官方仓库</a></li>
+          <li><a href="https://aclanthology.org/2026.acl-long.114/">MMSearch-R1: Incentivizing LMMs to Search</a> · <a href="https://github.com/EvolvingLMMs-Lab/multimodal-search-r1">代码</a></li>
+          <li><a href="https://arxiv.org/abs/2510.12801">DeepMMSearch-R1: Empowering Multimodal LLMs with Deep Search</a> · <a href="https://machinelearning.apple.com/research/r1">项目页</a></li>
+          <li><a href="https://arxiv.org/abs/2601.22060">Vision-DeepResearch</a> · <a href="https://github.com/Osilly/Vision-DeepResearch">代码</a></li>
+          <li><a href="https://arxiv.org/abs/2605.05185">OpenSearch-VL: Towards Open-ended Multimodal Deep Research</a> · <a href="https://github.com/shawn0728/OpenSearch-VL">代码</a></li>
         </ol>
       </article>
     </div>

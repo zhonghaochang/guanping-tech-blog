@@ -116,6 +116,10 @@ img { max-width: 100%; height: auto; }
 .site-search button { padding: 0 10px; cursor: pointer; color: #fff; border: 1px solid var(--accent); border-radius: 4px; background: var(--accent); font: 13px var(--sans); }
 .side-list, .topic-list { margin: 0; padding-left: 20px; color: var(--ink-soft); font-size: 14px; }
 .side-list li, .topic-list li { margin: 6px 0; }
+.link-list { margin: 0; padding: 0; list-style: none; font-size: 14px; }
+.link-list li { padding: 7px 0; border-bottom: 1px dotted var(--rule); }
+.link-list li:last-child { border-bottom: 0; }
+.link-list a { display: block; }
 
 /* Standalone and archive pages */
 .plain-page { min-width: 0; }

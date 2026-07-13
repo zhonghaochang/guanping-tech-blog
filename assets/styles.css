@@ -128,8 +128,8 @@ img { max-width: 100%; height: auto; }
 .plain-page > p, .plain-page > ul { font-size: 17px; }
 .plain-page h2 { margin: 42px 0 18px; font-size: 24px; }
 .profile-hero { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 34px; align-items: center; margin-top: 8px; }
-.profile-photo-frame { width: 230px; height: 290px; overflow: hidden; border: 1px solid var(--rule); border-radius: 8px; background: #aaa; }
-.profile-photo { width: 100%; height: 100%; object-fit: cover; object-position: 50% 18%; transform: scale(1.38); transform-origin: 50% 24%; }
+.profile-photo-frame { width: 230px; aspect-ratio: 4186 / 5756; overflow: hidden; border: 1px solid var(--rule); border-radius: 8px; background: #aaa; }
+.profile-photo { display: block; width: 100%; height: auto; }
 .profile-copy h1 { margin: 0 0 18px; font-size: 36px; }
 .profile-copy p { margin: 0 0 15px; color: var(--ink-soft); font-size: 16px; line-height: 1.85; }
 .profile-section h2 { margin-top: 44px; }
@@ -252,7 +252,7 @@ tr:last-child td { border-bottom: 0; }
   .article h2 { margin-top: 45px; font-size: 24px; }
   .article-index ol { columns: 1; }
   .profile-hero { grid-template-columns: 1fr; gap: 22px; }
-  .profile-photo-frame { width: 200px; height: 250px; }
+  .profile-photo-frame { width: 200px; }
   .profile-copy h1 { font-size: 31px; }
   .timeline-item { grid-template-columns: 1fr; gap: 8px; }
   pre { padding: 16px; font-size: 12px; }

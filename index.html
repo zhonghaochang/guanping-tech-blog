@@ -37,9 +37,9 @@
       <p class="section-label">最新发布</p>
       <article class="featured-post" data-search-item>
         <h1><a href="posts/deepsearch-from-zero.html">一个 Agent Search 轨迹是怎么样的？</a></h1>
-        <div class="post-meta"><time datetime="2026-07-12">2026 年 7 月 12 日</time></div>
-        <p>如果只看最终回答，DeepSearch 和普通问答没有区别。真正需要训练的是中间过程：模型为什么发起搜索，工具返回了什么，以及什么时候证据已经足够。</p>
-        <p>本文从一条完整轨迹出发，拆开消息历史、事件日志、图片状态和 Harness，看看一次搜索怎样被执行、记录和调试。</p>
+        <div class="post-meta"><time datetime="2026-07-13">2026 年 7 月 13 日</time></div>
+        <p>一条 Search 轨迹不是一大段模糊的“思考”，而是查询、工具返回、证据状态和最终作答组成的事件序列。</p>
+        <p>本文分别跑一条纯文本 Search 和一条多模态 Search，直接看 Agent 每一步拿到了什么、为什么继续，以及什么时候应该停。</p>
         <a class="read-more" href="posts/deepsearch-from-zero.html">继续阅读全文 »</a>
       </article>
 
@@ -48,14 +48,14 @@
         <p class="search-status" data-search-status aria-live="polite"></p>
         <ol class="recent-list">
           <li data-search-item>
-            <time datetime="2026-07-12">2026 年 7 月 12 日</time><span>»</span>
-            <a href="posts/agent-harness-multimodal-search.html">多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness</a>
-            <p>核对 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 与 OpenSearch-VL 的样本、训练与工具环境。</p>
+            <time datetime="2026-07-13">2026 年 7 月 13 日</time><span>»</span>
+            <a href="posts/agent-harness-multimodal-search.html">多模态 DeepSearch 的训练路线</a>
+            <p>把四篇工作串起来看：从短轨迹、局部图搜索，一直走到异步长轨迹和主动视觉工具。</p>
           </li>
           <li data-search-item>
-            <time datetime="2026-07-12">2026 年 7 月 12 日</time><span>»</span>
+            <time datetime="2026-07-13">2026 年 7 月 13 日</time><span>»</span>
             <a href="posts/deepsearch-from-zero.html">一个 Agent Search 轨迹是怎么样的？</a>
-            <p>从完整事件日志出发，解释工具调用、观察回填、图片状态和停止条件。</p>
+            <p>用纯文本和多模态两条实际日志，拆开查询、工具返回、证据状态和停止条件。</p>
           </li>
         </ol>
         <a class="archive-link" href="archives.html">查看全部文章……</a>

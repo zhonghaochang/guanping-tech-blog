@@ -36,11 +36,11 @@
     <div class="content-column">
       <p class="section-label">最新发布</p>
       <article class="featured-post" data-search-item>
-        <h1><a href="posts/deepsearch-from-zero.html">一个 Agent Search 轨迹是怎么样的？</a></h1>
+        <h1><a href="posts/verl-async-rl.html">verl 里的异步强化学习：从 Group 到权重同步</a></h1>
         <div class="post-meta"><time datetime="2026-07-13">2026 年 7 月 13 日</time></div>
-        <p>一条 Search 轨迹不是一大段模糊的“思考”，而是查询、工具返回、证据状态和最终作答组成的事件序列。</p>
-        <p>本文分别跑一条纯文本 Search 和一条多模态 Search，直接看 Agent 每一步拿到了什么、为什么继续，以及什么时候应该停。</p>
-        <a class="read-more" href="posts/deepsearch-from-zero.html">继续阅读全文 »</a>
+        <p>异步 RL 不是把一个开关改成 async，而是让完整 prompt group 持续流入训练，使 Rollouter 与 Trainer 形成流水线。</p>
+        <p>沿着 verl V1 源码，拆开 batch、group、并发 rollout、参数更新、权重同步与 stale trajectory。</p>
+        <a class="read-more" href="posts/verl-async-rl.html">继续阅读全文 »</a>
       </article>
 
       <section class="recent-section" aria-labelledby="recent-title">
@@ -48,12 +48,12 @@
         <p class="search-status" data-search-status aria-live="polite"></p>
         <ol class="recent-list">
           <li data-search-item>
-            <time datetime="2026-07-13">2026 年 7 月 13 日</time><span>»</span>
+            <time datetime="2026-07-12">2026 年 7 月 12 日</time><span>»</span>
             <a href="posts/agent-harness-multimodal-search.html">多模态 DeepSearch 的训练路线</a>
             <p>把四篇工作串起来看：从短轨迹、局部图搜索，一直走到异步长轨迹和主动视觉工具。</p>
           </li>
           <li data-search-item>
-            <time datetime="2026-07-13">2026 年 7 月 13 日</time><span>»</span>
+            <time datetime="2026-07-12">2026 年 7 月 12 日</time><span>»</span>
             <a href="posts/deepsearch-from-zero.html">一个 Agent Search 轨迹是怎么样的？</a>
             <p>用纯文本和多模态两条实际日志，拆开查询、工具返回、证据状态和停止条件。</p>
           </li>
@@ -74,7 +74,7 @@
       <section class="side-card">
         <h2>关于本站</h2>
         <p>我是常中豪。这里分享研究和学习记录，也会写一些我觉得有趣的研究。</p>
-        <ul class="side-list"><li>文章：<a href="archives.html">2 篇</a></li><li>持续更新中</li></ul>
+        <ul class="side-list"><li>文章：<a href="archives.html">3 篇</a></li><li>持续更新中</li></ul>
       </section>
       <section class="side-card">
         <h2>链接</h2>

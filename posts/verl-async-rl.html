@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>verl 里的异步强化学习：从 Group 到权重同步｜常中豪</title>
+  <meta name="description" content="结合 verl V1 源码，解释异步 RL 中的 prompt group、batch、并发 rollout、ReplayBuffer、参数更新与 rollout 权重同步。" />
+  <meta name="theme-color" content="#f4f3d9" />
+  <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/verl-async-rl.html" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="常中豪的技术博客" />
+  <meta property="og:title" content="verl 里的异步强化学习：从 Group 到权重同步" />
+  <meta property="og:description" content="不把 async 当成一个开关：沿着 verl 源码看清 rollout、group、batch、更新与权重同步。" />
+  <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/verl-async-rl.html" />
+  <meta property="article:published_time" content="2026-07-13" />
+  <meta name="twitter:card" content="summary" />
+  <link rel="icon" href="../assets/favicon.svg" />
+  <link rel="stylesheet" href="../assets/styles.css?v=4" />
+</head>
+<body>
+  <div class="progress"></div>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="../index.html"><span class="brand-mark">常</span><span>常中豪的技术博客</span><span class="brand-note">关于模型、搜索与训练</span></a>
+      <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
+      <div class="nav-links" id="site-navigation"><a href="../index.html">首页</a><a href="../archives.html">归档</a><a href="../about.html">关于</a><button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button></div>
+    </nav>
+  </header>
+
+  <main class="article-shell">
+    <header class="article-masthead">
+      <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
+      <div class="article-headline">
+        <h1>verl 里的异步强化学习：从 Group 到权重同步</h1>
+        <p class="article-deck">异步 RL 不是把一个开关改成 <code>async</code>。真正需要看清的是：谁在并发、训练何时开始、参数何时更新，以及 rollout 何时拿到新权重。</p>
+      </div>
+      <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 13 日 · 基于 verl main <code>e5687fce</code></div>
+    </header>
+
+    <div class="article-layout">
+      <article class="article">
+        <p>大模型强化学习后训练通常有两类重计算：rollout 负责生成轨迹，Trainer 负责计算奖励、advantage 并更新 actor。同步系统按“生成一批 → 训练一批”串行执行；异步系统让已完成的轨迹先进入训练，同时 rollout 继续生产后续数据。</p>
+
+        <div class="note"><strong>一句话定义：</strong>异步 RL 的核心不是“同一个 prompt 的回答没生成完就训练”，而是让完整 group 持续流入缓冲区，使 rollout 与训练形成流水线。</div>
+
+        <h2>先统一单位：prompt、group 与 batch</h2>
+        <p>在 GRPO 中，一个 prompt 会采样 <code>n</code> 个 response，这 <code>n</code> 条轨迹共同构成一个 group。组内 advantage 依赖相对奖励，因此一个 group 通常要完整生成后才能参与训练。</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">example.yaml</span><button class="copy-btn">复制</button></div><pre><code>data:
+  train_batch_size: 64       # 64 个 prompt group
+
+actor_rollout_ref:
+  rollout:
+    n: 8                     # 每个 prompt 生成 8 条 response</code></pre></div>
+
+        <p>这批数据包含 64 个 group、512 条 trajectory。<code>batch</code> 不是“一个 GRPO group 的大小”，而是一次训练阶段消费的多个 group；<code>rollout.n</code> 才是单个 group 的 response 数量。</p>
+
+        <h2>verl 中有两层 async，不要混淆</h2>
+        <p><code>actor_rollout_ref.rollout.mode=async</code> 表示 rollout 使用异步 server 接口。当前 main 分支已经移除同步 rollout，它并不自动让 Trainer 与 Rollouter 并行。训练调度由 <code>trainer.v1.trainer_mode</code> 决定。</p>
+
+        <div class="table-wrap"><table>
+          <thead><tr><th>模式</th><th>资源布局</th><th>实际含义</th></tr></thead>
+          <tbody>
+            <tr><td><code>sync</code></td><td>训练与生成共享 GPU</td><td>完整生成一批，再训练一批</td></tr>
+            <tr><td><code>colocate_async</code></td><td>训练与生成共享 GPU</td><td>prompt 异步调度，但 GPU 计算仍主要分阶段</td></tr>
+            <tr><td><code>separate_async</code></td><td>训练与生成使用不同 GPU</td><td>两端可同时计算，形成完整流水线</td></tr>
+          </tbody>
+        </table></div>
+
+        <p>三个实现分别注册为 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_sync.py#L24-L45"><code>sync</code></a>、<a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_colocate_async.py#L25-L59"><code>colocate_async</code></a> 和 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_separate_async.py#L37-L88"><code>separate_async</code></a>。入口 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/main_ppo.py#L129-L179"><code>main_ppo.py</code></a> 根据配置选择 Trainer。</p>
+
+        <h2>一条 group 在源码里怎样流动</h2>
+        <p>V1 Trainer 的数据通路可以压缩成五步：</p>
+
+        <ol>
+          <li>Trainer 从 dataloader 取 prompt，写入 <code>TransferQueue</code>，初始状态为 <code>pending</code>。</li>
+          <li><code>AgentLoopWorkerTQ</code> 为每个 prompt 创建 <code>n</code> 个异步生成任务。</li>
+          <li><code>asyncio.gather</code> 等齐组内 response，再把该 group 标记为 <code>finished</code>。</li>
+          <li><code>ReplayBuffer</code> 只抽取已经完成的 group；慢 prompt 不再阻塞其他 prompt。</li>
+          <li>Trainer 计算 reward、advantage，更新 critic 与 actor，再按策略向 rollout 同步权重。</li>
+        </ol>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">conceptual_flow.txt</span><button class="copy-btn">复制</button></div><pre><code>Prompt A ─┬─ A1 ─┐
+          ├─ ... │─ group A finished ─┐
+          └─ A8 ─┘                    │
+Prompt B ─── still running            ├─ ReplayBuffer ─→ Trainer
+Prompt C ─┬─ C1 ─┐                    │
+          └─ C8 ─┘─ group C finished ─┘</code></pre></div>
+
+        <p>关键源码是 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/agent_loop_tq.py#L54-L128"><code>agent_loop_tq.py</code></a> 的并发生成，以及 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/replay_buffer.py#L143-L238"><code>replay_buffer.py</code></a> 对完整 group 的采样。异步发生在 group 之间，GRPO 的组内比较仍然完整。</p>
+
+        <h2>一次参数更新，不等于一次 rollout 权重同步</h2>
+        <p>这是理解 <code>separate_async</code> 最重要的区别。假设：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">separate_async.yaml</span><button class="copy-btn">复制</button></div><pre><code>data:
+  train_batch_size: 64
+
+actor_rollout_ref:
+  rollout:
+    n: 8
+  actor:
+    ppo_mini_batch_size: 16
+
+trainer:
+  v1:
+    trainer_mode: separate_async
+    separate_async:
+      parameter_sync_step: 4</code></pre></div>
+
+        <p>源码要求 <code>train_batch_size = parameter_sync_step × ppo_mini_batch_size</code>，这里正好是 <code>64 = 4 × 16</code>。Trainer 每次取 16 个完整 group，更新一次 actor；连续更新 4 次后，才把新权重同步给 rollout 集群。</p>
+
+        <div class="table-wrap"><table>
+          <thead><tr><th>阶段</th><th>消费数据</th><th>发生的动作</th></tr></thead>
+          <tbody>
+            <tr><td>本地更新 1–4</td><td>每次 16 group = 128 trajectories</td><td>Trainer actor 参数各更新一次</td></tr>
+            <tr><td>累计</td><td>64 group = 512 trajectories</td><td>共完成 4 次本地更新</td></tr>
+            <tr><td>阶段结束</td><td>—</td><td>把新权重同步给 Rollouter</td></tr>
+          </tbody>
+        </table></div>
+
+        <p>这段循环位于 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_base.py#L418-L495"><code>trainer_base.py</code></a>。Trainer 更新期间，独立 Rollouter 可以继续用旧版本策略生成，因此吞吐提高，但数据不再严格 on-policy。</p>
+
+        <h2>异步的代价：stale trajectory</h2>
+        <p>假设 Rollouter 正在使用策略 v10，Trainer 已经依次更新到 v14。此时由 v10 生成、尚未消费的轨迹就是 stale trajectory。异步程度越高，设备空转越少，但策略版本差距也可能越大。</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">off_policy_control.yaml</span><button class="copy-btn">复制</button></div><pre><code>trainer:
+  v1:
+    sampler:
+      max_off_policy_threshold: 8
+      max_off_policy_strategy: drop  # 或 wait</code></pre></div>
+
+        <p>V1 sampler 可以限制可接受的版本跨度，并丢弃过旧数据。工程上要调的是三者平衡：rollout 吞吐、参数同步频率和 off-policy 偏差，而不是一味追求“越异步越好”。</p>
+
+        <h2>怎样选择模式</h2>
+        <ul>
+          <li>单机或 GPU 紧张：先用 <code>colocate_async</code>，它主要解决 prompt 长尾和队列调度。</li>
+          <li>有独立训练与推理资源：使用 <code>separate_async</code>，并从较小的 <code>parameter_sync_step</code> 开始。</li>
+          <li>只设置 <code>rollout.mode=async</code>：得到异步 rollout 接口，不等于异步训练流水线。</li>
+        </ul>
+
+        <div class="warning"><strong>版本提示：</strong>上述 <code>trainer.v1.trainer_mode</code> 来自 verl main 的 0.9.0.dev 代码。verl 0.8.0 的全异步入口仍位于 <code>verl.experimental.fully_async_policy</code>，由 <code>fully_async_main</code> 同时启动 Trainer 与 Rollouter；两套配置不要混用。</div>
+
+        <h2>结论</h2>
+        <p>verl 的异步 RL 可以归结为一条清晰边界：组内 response 等齐，组间异步流动；Trainer 可以多次更新参数，Rollouter 再按设定频率接收新权重。理解这两个层次，才能正确解释 batch、group、参数更新、权重同步和 stale trajectory。</p>
+
+        <h2>源码索引</h2>
+        <ol class="references">
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/config/ppo_trainer.yaml#L200-L236">V1 trainer mode 与 sampler 配置</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/agent_loop_tq.py#L54-L128">AgentLoop：一个 prompt 内并发生成 n 条 response</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/replay_buffer.py#L143-L238">ReplayBuffer：按完整 prompt group 采样</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_separate_async.py#L37-L88">SeparateAsyncTrainer：资源与参数同步约束</a></li>
+          <li><a href="https://verl.readthedocs.io/en/latest/advance/fully_async.html">verl 官方 Fully Async 文档</a></li>
+        </ol>
+      </article>
+    </div>
+  </main>
+
+  <footer class="footer"><div class="footer-inner"><span>© 2026 常中豪</span><span>研究与学习记录。</span><a href="deepsearch-from-zero.html">下一篇：Agent Search 轨迹 »</a></div></footer>
+  <script src="../assets/app.js?v=3"></script>
+</body>
+</html>

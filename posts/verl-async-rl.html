@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>verl 里的异步强化学习：从 Group 到权重同步｜常中豪</title>
-  <meta name="description" content="结合 verl V1 源码，解释异步 RL 中的 prompt group、batch、并发 rollout、ReplayBuffer、参数更新与 rollout 权重同步。" />
+  <title>我在 verl 里读异步强化学习：Group、队列与权重同步｜常中豪</title>
+  <meta name="description" content="一篇沿 verl V1 PPO 源码展开的异步强化学习阅读笔记：从 GRPO group、TransferQueue 和 ReplayBuffer，一直读到本地更新、权重同步与策略滞后。" />
   <meta name="theme-color" content="#f4f3d9" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/verl-async-rl.html" />
   <meta property="og:locale" content="zh_CN" />
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="常中豪的技术博客" />
-  <meta property="og:title" content="verl 里的异步强化学习：从 Group 到权重同步" />
-  <meta property="og:description" content="不把 async 当成一个开关：沿着 verl 源码看清 rollout、group、batch、更新与权重同步。" />
+  <meta property="og:title" content="我在 verl 里读异步强化学习：Group、队列与权重同步" />
+  <meta property="og:description" content="从一处 batch 疑问出发，沿 verl 源码看异步 rollout、GRPO group、本地参数更新与 rollout 权重同步。" />
   <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/verl-async-rl.html" />
   <meta property="article:published_time" content="2026-07-13" />
   <meta name="twitter:card" content="summary" />
   <link rel="icon" href="../assets/favicon.svg" />
-  <link rel="stylesheet" href="../assets/styles.css?v=4" />
+  <link rel="stylesheet" href="../assets/styles.css?v=5" />
 </head>
 <body>
   <div class="progress"></div>
@@ -32,68 +32,213 @@
     <header class="article-masthead">
       <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
       <div class="article-headline">
-        <h1>verl 里的异步强化学习：从 Group 到权重同步</h1>
-        <p class="article-deck">异步 RL 不是把一个开关改成 <code>async</code>。真正需要看清的是：谁在并发、训练何时开始、参数何时更新，以及 rollout 何时拿到新权重。</p>
+        <h1>我在 verl 里读异步强化学习：Group、队列与权重同步</h1>
+        <p class="article-deck">最初只是想确认“一个 batch 是不是一个 GRPO group”，结果顺着这个问题一路读到了 TransferQueue、ReplayBuffer、局部更新和策略滞后。这篇把我的阅读路径和算例完整记下来。</p>
       </div>
-      <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 13 日 · 基于 verl main <code>e5687fce</code></div>
+      <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 13 日 · verl main <code>e5687fce</code></div>
     </header>
 
     <div class="article-layout">
       <article class="article">
-        <p>大模型强化学习后训练通常有两类重计算：rollout 负责生成轨迹，Trainer 负责计算奖励、advantage 并更新 actor。同步系统按“生成一批 → 训练一批”串行执行；异步系统让已完成的轨迹先进入训练，同时 rollout 继续生产后续数据。</p>
+        <p>最近在看 verl 新版 PPO Trainer。起因很具体：配置里同时出现了 <code>train_batch_size</code>、<code>ppo_mini_batch_size</code>、<code>rollout.n</code> 和 <code>parameter_sync_step</code>，名字都像“这一轮要用多少数据”，但它们数的不是同一种东西。再加上 <code>rollout.mode=async</code> 和 <code>trainer_mode=separate_async</code> 同时存在，很容易把“异步请求”理解成“异步训练”。</p>
 
-        <div class="note"><strong>一句话定义：</strong>异步 RL 的核心不是“同一个 prompt 的回答没生成完就训练”，而是让完整 group 持续流入缓冲区，使 rollout 与训练形成流水线。</div>
+        <p>我读的是 verl main 分支的 <code>e5687fce</code>，源码版本标记为 0.9.0.dev。下面不按配置项逐条翻译，而是从一个 prompt 进入系统开始，追到 actor 完成更新、Rollouter 收到新权重为止。这样更容易看清每个 batch 到底在哪里被切开，又在哪里重新合并。</p>
 
-        <h2>先统一单位：prompt、group 与 batch</h2>
-        <p>在 GRPO 中，一个 prompt 会采样 <code>n</code> 个 response，这 <code>n</code> 条轨迹共同构成一个 group。组内 advantage 依赖相对奖励，因此一个 group 通常要完整生成后才能参与训练。</p>
+        <h2>先把 batch 的账算清楚</h2>
 
-        <div class="code-frame"><div class="code-head"><span class="code-file">example.yaml</span><button class="copy-btn">复制</button></div><pre><code>data:
-  train_batch_size: 64       # 64 个 prompt group
+        <p>设一次从数据集取出 <em>B</em> 个 prompt。对第 <em>i</em> 个 prompt <em>q<sub>i</sub></em>，策略采样 <em>G</em> 个回答：</p>
 
-actor_rollout_ref:
-  rollout:
-    n: 8                     # 每个 prompt 生成 8 条 response</code></pre></div>
+        <div class="equation">𝒢<sub>i</sub> = { y<sub>i,1</sub>, y<sub>i,2</sub>, …, y<sub>i,G</sub> }, &nbsp; y<sub>i,j</sub> ∼ π<sub>old</sub>(· | q<sub>i</sub>)</div>
+        <p class="equation-note">𝒢<sub>i</sub> 是一个 GRPO group；G 在 verl 配置里对应 rollout.n。</p>
 
-        <p>这批数据包含 64 个 group、512 条 trajectory。<code>batch</code> 不是“一个 GRPO group 的大小”，而是一次训练阶段消费的多个 group；<code>rollout.n</code> 才是单个 group 的 response 数量。</p>
+        <p>GRPO 不训练单独的 value model，而是在同一 prompt 的回答之间构造相对基线。最常见的组内标准化写法是：</p>
 
-        <h2>verl 中有两层 async，不要混淆</h2>
-        <p><code>actor_rollout_ref.rollout.mode=async</code> 表示 rollout 使用异步 server 接口。当前 main 分支已经移除同步 rollout，它并不自动让 Trainer 与 Rollouter 并行。训练调度由 <code>trainer.v1.trainer_mode</code> 决定。</p>
+        <div class="equation">Â<sub>i,j</sub> = ( r<sub>i,j</sub> − μ<sub>i</sub> ) / ( σ<sub>i</sub> + ε )</div>
+        <p class="equation-note">μ<sub>i</sub> 与 σ<sub>i</sub> 都只由第 i 个 prompt 的 G 个 reward 计算。</p>
+
+        <p>因此，group 是 advantage 的统计边界，不是训练 batch 本身。若 <code>train_batch_size=64</code>、<code>rollout.n=8</code>，数据规模是：</p>
+
+        <div class="equation">B<sub>trajectory</sub> = B<sub>prompt</sub> × G = 64 × 8 = 512</div>
 
         <div class="table-wrap"><table>
-          <thead><tr><th>模式</th><th>资源布局</th><th>实际含义</th></tr></thead>
+          <thead><tr><th>量</th><th>这个例子里的值</th><th>它在数什么</th></tr></thead>
           <tbody>
-            <tr><td><code>sync</code></td><td>训练与生成共享 GPU</td><td>完整生成一批，再训练一批</td></tr>
-            <tr><td><code>colocate_async</code></td><td>训练与生成共享 GPU</td><td>prompt 异步调度，但 GPU 计算仍主要分阶段</td></tr>
-            <tr><td><code>separate_async</code></td><td>训练与生成使用不同 GPU</td><td>两端可同时计算，形成完整流水线</td></tr>
+            <tr><td><code>train_batch_size</code></td><td>64</td><td>prompt / group 的数量</td></tr>
+            <tr><td><code>rollout.n</code></td><td>8</td><td>每个 prompt 采样的 response 数量</td></tr>
+            <tr><td>trajectory 总数</td><td>512</td><td>真正送入 reward 与策略优化的数据条数</td></tr>
           </tbody>
         </table></div>
 
-        <p>三个实现分别注册为 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_sync.py#L24-L45"><code>sync</code></a>、<a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_colocate_async.py#L25-L59"><code>colocate_async</code></a> 和 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_separate_async.py#L37-L88"><code>separate_async</code></a>。入口 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/main_ppo.py#L129-L179"><code>main_ppo.py</code></a> 根据配置选择 Trainer。</p>
+        <p>这里还有一个对异步调度很关键的约束：可以让 prompt A 和 prompt C 先于 prompt B 进入训练，但不能随便拿 A 已完成的 3 个回答和未完成的 5 个回答去算组内 advantage。异步发生在 group 之间，组内仍需要一个完整的比较集合。</p>
 
-        <h2>一条 group 在源码里怎样流动</h2>
-        <p>V1 Trainer 的数据通路可以压缩成五步：</p>
+        <h2>我踩的第一个坑：代码里有两种 async</h2>
 
-        <ol>
-          <li>Trainer 从 dataloader 取 prompt，写入 <code>TransferQueue</code>，初始状态为 <code>pending</code>。</li>
-          <li><code>AgentLoopWorkerTQ</code> 为每个 prompt 创建 <code>n</code> 个异步生成任务。</li>
-          <li><code>asyncio.gather</code> 等齐组内 response，再把该 group 标记为 <code>finished</code>。</li>
-          <li><code>ReplayBuffer</code> 只抽取已经完成的 group；慢 prompt 不再阻塞其他 prompt。</li>
-          <li>Trainer 计算 reward、advantage，更新 critic 与 actor，再按策略向 rollout 同步权重。</li>
-        </ol>
+        <p>我一开始盯着 <code>actor_rollout_ref.rollout.mode=async</code> 看了很久，后来才发现当前 main 分支中同步 rollout 已经被删掉了。这个字段控制的是 rollout server 的调用方式，不负责安排 Trainer 与 Rollouter 是否重叠执行。</p>
 
-        <div class="code-frame"><div class="code-head"><span class="code-file">conceptual_flow.txt</span><button class="copy-btn">复制</button></div><pre><code>Prompt A ─┬─ A1 ─┐
-          ├─ ... │─ group A finished ─┐
-          └─ A8 ─┘                    │
-Prompt B ─── still running            ├─ ReplayBuffer ─→ Trainer
-Prompt C ─┬─ C1 ─┐                    │
-          └─ C8 ─┘─ group C finished ─┘</code></pre></div>
+        <div class="code-frame"><div class="code-head"><span class="code-file">verl/workers/config/rollout.py</span><button class="copy-btn">复制</button></div><pre><code>def __post_init__(self):
+    # only async mode is supported
+    if self.mode == "sync":
+        raise ValueError(
+            "Rollout mode 'sync' has been removed. "
+            "Please set actor_rollout_ref.rollout.mode=async"
+        )</code></pre></div>
 
-        <p>关键源码是 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/agent_loop_tq.py#L54-L128"><code>agent_loop_tq.py</code></a> 的并发生成，以及 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/replay_buffer.py#L143-L238"><code>replay_buffer.py</code></a> 对完整 group 的采样。异步发生在 group 之间，GRPO 的组内比较仍然完整。</p>
+        <p>决定训练调度方式的是另一处配置：</p>
 
-        <h2>一次参数更新，不等于一次 rollout 权重同步</h2>
-        <p>这是理解 <code>separate_async</code> 最重要的区别。假设：</p>
+        <div class="code-frame"><div class="code-head"><span class="code-file">verl/trainer/config/ppo_trainer.yaml</span><button class="copy-btn">复制</button></div><pre><code>trainer:
+  use_v1: true
+  v1:
+    # sync | colocate_async | separate_async
+    trainer_mode: sync
 
-        <div class="code-frame"><div class="code-head"><span class="code-file">separate_async.yaml</span><button class="copy-btn">复制</button></div><pre><code>data:
+    colocate_async:
+      num_warmup_batches: 1
+
+    separate_async:
+      num_warmup_batches: 1
+      parameter_sync_step: 4</code></pre></div>
+
+        <p><code>main_ppo.py</code> 没有在入口处写三大段 if/else，而是从 registry 里取 Trainer 类：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">verl/trainer/main_ppo.py</span><button class="copy-btn">复制</button></div><pre><code>from verl.trainer.ppo.v1 import get_trainer_cls
+
+trainer_cls = get_trainer_cls(
+    config.trainer.v1.trainer_mode
+)
+trainer = trainer_cls(config=config)
+trainer.init()
+trainer.fit()</code></pre></div>
+
+        <p>三个实现分别用装饰器注册为 <code>sync</code>、<code>colocate_async</code> 和 <code>separate_async</code>。所以判断一个 recipe 是否真的让训练与生成并行，我现在会先看 <code>trainer.v1.trainer_mode</code>，再看两边是否分配了独立 GPU；单看 rollout 的 <code>mode</code> 已经没有判断力。</p>
+
+        <h2>Prompt 进入 TransferQueue 以后发生了什么</h2>
+
+        <p>V1 Trainer 不再要求“生成函数返回一个完整 TensorDict，我才继续往下走”。它先给每个 prompt 分配 uid，把 prompt 作为一条状态记录写进 TransferQueue，然后把真正的生成工作交给 AgentLoopManager。</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">trainer_base.py · _submit_batch_to_rollout</span><button class="copy-btn">复制</button></div><pre><code>def _submit_batch_to_rollout(self, batch):
+    tags = [{
+        "is_prompt": True,
+        "status": "pending",
+        "global_steps": self.global_steps,
+    }] * len(batch)
+
+    tq.kv_batch_put(
+        keys=list(batch["uid"]),
+        partition_id="train",
+        tags=tags,
+    )
+    self.agent_loop_manager.generate_sequences(batch)</code></pre></div>
+
+        <p>这里的 <code>global_steps</code> 不只是日志步数。后面 ReplayBuffer 用它判断轨迹由哪个策略版本生成，以及这份数据相对当前模型已经旧了多少。</p>
+
+        <p>AgentLoop 这一侧有两层并发。外层按 prompt 创建 background task，不等待结果返回；内层再按照 <code>rollout.n</code> 为同一个 prompt 创建多个 session。</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">agent_loop_tq.py · 两层并发</span><button class="copy-btn">复制</button></div><pre><code>async def generate_sequences(self, batch):
+    for i in range(len(batch)):
+        task = asyncio.create_task(
+            self._run_prompt(prompt, sampling_params, ...)
+        )
+        self.background_tasks.add(task)
+
+async def _run_prompt(self, prompt, sampling_params, ...):
+    await tq.async_kv_put(
+        key=uid,
+        partition_id="train",
+        tag={"status": "running"},
+    )
+
+    tasks = [
+        asyncio.create_task(
+            self._run_agent_loop(..., session_id=i)
+        )
+        for i in range(n)
+    ]
+    await asyncio.gather(*tasks)
+    await tq.async_kv_put(
+        key=uid,
+        partition_id="train",
+        tag={"status": "finished"},
+    )</code></pre></div>
+
+        <p>这段实现解释了两个现象。第一，不同 prompt 的完成顺序可以与 dataloader 顺序完全不同；第二，<code>finished</code> 是在 <code>asyncio.gather(*tasks)</code> 之后写入的，也就是一个 prompt 的 <em>n</em> 个 session 都结束以后，group 才对训练端可见。</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">某一时刻的队列状态</span><button class="copy-btn">复制</button></div><pre><code>prompt A   finished   A0 A1 A2 A3 A4 A5 A6 A7
+prompt B   running    B0 B1 B2 B3 ...
+prompt C   finished   C0 C1 C2 C3 C4 C5 C6 C7
+prompt D   pending
+
+ReplayBuffer 可以先取 A、C；不需要等 B。
+但 A0~A7 仍作为同一个 group 被取走。</code></pre></div>
+
+        <h2>ReplayBuffer 并不只是一个“先进先出队列”</h2>
+
+        <p>我原先以为 ReplayBuffer 只是把完成的数据攒够一个 batch。实际读下来，它还承担了 group 边界、旧数据优先级和 off-policy 淘汰三件事。</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">replay_buffer.py · sample</span><button class="copy-btn">复制</button></div><pre><code>while not self._has_enough_samples(
+    global_steps, partition_id, batch_size
+):
+    time.sleep(self.poll_interval)
+    self._sync_metadata_from_transfer_queue()
+
+# 先取模型版本最老的 prompt，减少继续变旧的机会
+sampleable_keys = sorted(
+    finished_keys.union(failure_keys),
+    key=lambda key: prompt_global_steps.get(key, 0),
+)
+selected_prompt_uids = sampleable_keys[:batch_size]
+
+# 一个 uid 被选中后，把它下面的所有 trajectory 展开
+for key, tag in self.partitions[partition_id].items():
+    uid = key.split("_")[0]
+    if uid in selected_prompt_uids:
+        keys.append(key)
+        tags.append(tag)</code></pre></div>
+
+        <p>这里有个容易被教程略过去的实现细节：当前代码把 <code>finished_keys</code> 和 <code>failure_keys</code> 合并后采样。源码第 220 行还留着 TODO：是否应该过滤掉“某些 session 失败”的样本。也就是说，“group 必须全部成功才进入训练”并不是这版 ReplayBuffer 已经严格保证的性质。<code>finished</code> 表示全组正常结束，<code>failure</code> 则需要结合后续数据清洗和 padding 行为继续确认。</p>
+
+        <p>另一个值得注意的地方是采样单位。<code>batch_size</code> 先选 prompt uid，选中后再把这个 uid 下的 trajectory 展开。因此在这条 V1 路径里，ReplayBuffer 接收的 batch size 是 group 数，而不是展开后的 response 数。</p>
+
+        <h2>取到数据以后，参数究竟更新了几次</h2>
+
+        <p><code>trainer_base.py</code> 的 <code>_step_once</code> 很适合用来核对一轮训练到底包含什么。删掉计时和可选分支后，主干大致是：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">trainer_base.py · _step_once</span><button class="copy-btn">复制</button></div><pre><code>batch = self.replay_buffer.sample(
+    global_steps=self.global_steps,
+    partition_id="train",
+    batch_size=sample_batch_size,
+)
+
+batch = self._compute_reward_colocate(batch)
+batch = self._balance_batch(batch)
+batch = self._compute_old_log_prob(batch)
+
+if self.use_reference_policy:
+    batch = self._compute_ref_log_prob(batch)
+
+if self.use_critic:
+    batch = self._compute_values(batch)
+
+batch = self._compute_advantage(batch)
+
+if self.use_critic:
+    batch = self._update_critic(batch)
+
+batch = self._update_actor(batch)</code></pre></div>
+
+        <p>这也是为什么 verl 的类名仍叫 PPOTrainer：底层管线兼容 PPO、GRPO 以及其他 advantage estimator，critic 和 reference policy 都是条件分支。使用 GRPO 时，组内 reward 产生 Â；进入 actor update 后，目标仍可写成 PPO 风格的 clipped surrogate。</p>
+
+        <div class="equation">ρ<sub>i,j,t</sub>(θ) = π<sub>θ</sub>(y<sub>i,j,t</sub> | q<sub>i</sub>, y<sub>i,j,&lt;t</sub>) / π<sub>old</sub>(y<sub>i,j,t</sub> | q<sub>i</sub>, y<sub>i,j,&lt;t</sub>)</div>
+
+        <div class="equation">J(θ) = 𝔼[min(ρ<sub>i,j,t</sub>Â<sub>i,j</sub>, clip(ρ<sub>i,j,t</sub>, 1−ε, 1+ε)Â<sub>i,j</sub>)]</div>
+        <p class="equation-note">不同 recipe 还会叠加 KL、熵正则、长度归一化或 rollout correction；这里保留与异步问题直接相关的主项。</p>
+
+        <h2>用 64 个 prompt 把 parameter_sync_step 跑一遍</h2>
+
+        <p><code>parameter_sync_step</code> 是我第二次读源码才真正分清的参数。它不是“多少 batch 才更新 actor”，而是一次全局 step 内做多少次本地训练更新，然后再把权重推给 Rollouter。</p>
+
+        <p>仍用前面的数字：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">关键配置</span><button class="copy-btn">复制</button></div><pre><code>data:
   train_batch_size: 64
 
 actor_rollout_ref:
@@ -108,49 +253,162 @@ trainer:
     separate_async:
       parameter_sync_step: 4</code></pre></div>
 
-        <p>源码要求 <code>train_batch_size = parameter_sync_step × ppo_mini_batch_size</code>，这里正好是 <code>64 = 4 × 16</code>。Trainer 每次取 16 个完整 group，更新一次 actor；连续更新 4 次后，才把新权重同步给 rollout 集群。</p>
+        <p><code>PPOTrainerSeparateAsync.__init__</code> 直接检查下面这个等式：</p>
+
+        <div class="equation">B<sub>train</sub> = K<sub>sync</sub> × B<sub>mini</sub> = 4 × 16 = 64</div>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">trainer_separate_async.py · 初始化约束</span><button class="copy-btn">复制</button></div><pre><code>assert train_batch_size == (
+    parameter_sync_step * ppo_mini_batch_size
+)
+
+rollout = config.actor_rollout_ref.rollout
+assert rollout.nnodes &gt; 0
+assert rollout.n_gpus_per_node &gt; 0
+assert rollout.checkpoint_engine.backend != "naive"</code></pre></div>
+
+        <p>随后，<code>PPOTrainer.step</code> 把 64 个 group 切成 4 份，每份 16 个 group：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">trainer_base.py · step</span><button class="copy-btn">复制</button></div><pre><code>sample_batch_size = (
+    train_batch_size // self.parameter_sync_step
+)
+
+self._add_batch_to_generate()
+
+for _ in range(self.parameter_sync_step):
+    batch = self._step_once(
+        iter_metrics,
+        timing_raw,
+        sample_batch_size,
+    )</code></pre></div>
+
+        <p>时间线上发生的是：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">64 groups × 8 responses</span><button class="copy-btn">复制</button></div><pre><code>local update 1: 16 groups × 8 = 128 trajectories → actor update
+local update 2: 16 groups × 8 = 128 trajectories → actor update
+local update 3: 16 groups × 8 = 128 trajectories → actor update
+local update 4: 16 groups × 8 = 128 trajectories → actor update
+-----------------------------------------------------------------
+global step:    64 groups × 8 = 512 trajectories → sync weights</code></pre></div>
+
+        <p>更严谨地说，Trainer 执行了 4 次 <code>_update_actor</code> 调用。每次调用内部还会受 <code>ppo_epochs</code>、data parallel 切分和 micro-batch 影响，不能直接把“4 次 local update”写成“恰好 4 次 <code>optimizer.step()</code>”。默认 <code>ppo_epochs=1</code> 时两者比较接近，但换了 recipe 就未必成立。</p>
+
+        <p>直到外层 step 结束，<code>on_step_end</code> 才调用 <code>standalone_checkpoint_manager.update_weights(self.global_steps)</code>，把当前参数同步给独立的 rollout replicas。于是，“一个 batch 更新一次参数”这句话少了主语：Trainer 内部有自己的优化步，推理端看到新参数则由权重同步边界决定。</p>
+
+        <h2>异步训练省下了等待，也引入了策略滞后</h2>
+
+        <p>同步训练中，数据大致由当前策略 π<sub>old</sub> 生成，更新时两者距离有限。分离式异步训练里，Rollouter 可能还在用版本 <em>v</em>，Trainer 已经更新到 <em>v+k</em>。更准确地写，轨迹来自 behavior policy μ：</p>
+
+        <div class="equation">μ = π<sub>θ<sub>v</sub></sub>, &nbsp;&nbsp; π<sub>train</sub> = π<sub>θ<sub>v+k</sub></sub>, &nbsp;&nbsp; Δv = k</div>
+
+        <p>此时 importance ratio 的分母应该对应真正生成 token 的 μ，而不是想当然地拿当前策略代替：</p>
+
+        <div class="equation">ρ<sub>t</sub>(θ) = π<sub>θ</sub>(y<sub>t</sub> | s<sub>t</sub>) / μ(y<sub>t</sub> | s<sub>t</sub>)</div>
+
+        <p>这不是只停留在公式上的修正。<code>PPOTrainerSeparateAsync</code> 会强制打开 rollout-correction 的 bypass mode；基类随后直接把生成时保存的 <code>rollout_log_probs</code> 当作 <code>old_log_probs</code>。换句话说，这条路径的分母确实来自 behavior policy：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">separate async · behavior policy log-prob</span><button class="copy-btn">复制</button></div><pre><code># trainer_separate_async.py
+self.config.algorithm.rollout_correction.bypass_mode = True
+
+# trainer_base.py
+if bypass_recomputing_logprobs:
+    data = tq.kv_batch_get(
+        keys=batch.keys,
+        partition_id=batch.partition_id,
+        select_fields=["rollout_log_probs"],
+    )
+    old_log_probs = data["rollout_log_probs"]</code></pre></div>
+
+        <p>源码旁边还写着 decoupled PPO 暂未支持。那种模式会区分 π<sub>rollout</sub>、稳定的 proximal anchor π<sub>old</sub> 和正在更新的 π<sub>θ</sub> 三个策略；当前 separate async 走的是更直接的两策略路径。</p>
+
+        <p>版本差距越大，ratio 越容易离开 clipping 区间，大量 token 的梯度会被裁掉；更糟时，旧策略覆盖的回答区域已经偏离当前策略，希望靠有限样本做 importance correction 也会变得不稳定。所以异步的收益不是免费的，它用一定程度的 off-policy 偏差换设备利用率。</p>
+
+        <p>verl V1 用 <code>max_off_policy_threshold</code> 限制轨迹跨越的模型版本数。<code>drop</code> 策略的判断很直接：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">replay_buffer.py · 丢弃过旧样本</span><button class="copy-btn">复制</button></div><pre><code>prompt_step = tag["global_steps"]
+staleness = global_steps - prompt_step + 1
+
+if staleness &gt; self.max_off_policy_threshold:
+    dropped_keys.append(key)
+else:
+    kept_keys.append(key)</code></pre></div>
+
+        <p>配置里还提供 <code>wait</code>。它不是不管旧数据，而是在 pending/running group 即将达到阈值时，阻止训练继续向前冲，等这些 group 完成。<code>drop</code> 保吞吐但浪费生成算力，<code>wait</code> 保样本但可能重新引入等待，两者没有普遍更优的答案。</p>
+
+        <p>partial rollout 还会带来“同一条 trajectory 跨多个模型版本”的情况。Trainer 已经记录了 <code>min_global_steps</code> 与 <code>max_global_steps</code>，并计算：</p>
+
+        <div class="equation">span = v<sub>max</sub> − v<sub>min</sub> + 1</div>
+        <div class="equation">staleness<sub>fresh</sub> = v<sub>current</sub> − v<sub>max</sub>, &nbsp; staleness<sub>worst</sub> = v<sub>current</sub> − v<sub>min</sub></div>
+
+        <p>这几个指标比单看 generation latency 更有用。若吞吐提高了，但 <code>trajectory_spans/max</code> 和 <code>trajectory_staleness_worst/mean</code> 同时快速上升，说明系统只是把 GPU 空转问题换成了更严重的策略偏差。</p>
+
+        <h2>三种 Trainer mode 放在一起看</h2>
 
         <div class="table-wrap"><table>
-          <thead><tr><th>阶段</th><th>消费数据</th><th>发生的动作</th></tr></thead>
+          <thead><tr><th>模式</th><th>GPU 布局</th><th>训练期间的 Rollout</th><th>更适合什么情况</th></tr></thead>
           <tbody>
-            <tr><td>本地更新 1–4</td><td>每次 16 group = 128 trajectories</td><td>Trainer actor 参数各更新一次</td></tr>
-            <tr><td>累计</td><td>64 group = 512 trajectories</td><td>共完成 4 次本地更新</td></tr>
-            <tr><td>阶段结束</td><td>—</td><td>把新权重同步给 Rollouter</td></tr>
+            <tr><td><code>sync</code></td><td>同一资源池</td><td>等完整 batch，训练与生成串行</td><td>先跑通、排查数值与奖励问题</td></tr>
+            <tr><td><code>colocate_async</code></td><td>Trainer 与 Rollout 共用 GPU</td><td>请求异步；采样结束后暂停生成、释放权重和 KV cache</td><td>GPU 数量有限，主要想减少 prompt 长尾</td></tr>
+            <tr><td><code>separate_async</code></td><td>独立 rollout GPU</td><td>Trainer 更新时，standalone Rollouter 仍可生成</td><td>有独立资源，目标是形成训练—生成流水线</td></tr>
           </tbody>
         </table></div>
 
-        <p>这段循环位于 <a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_base.py#L418-L495"><code>trainer_base.py</code></a>。Trainer 更新期间，独立 Rollouter 可以继续用旧版本策略生成，因此吞吐提高，但数据不再严格 on-policy。</p>
+        <p><code>colocate_async</code> 的源码很能说明“调度异步”和“计算并行”的差别。采样结束后它会终止未完成请求，并让 replicas sleep；当前 step 完成权重更新后再恢复 generation：</p>
 
-        <h2>异步的代价：stale trajectory</h2>
-        <p>假设 Rollouter 正在使用策略 v10，Trainer 已经依次更新到 v14。此时由 v10 生成、尚未消费的轨迹就是 stale trajectory。异步程度越高，设备空转越少，但策略版本差距也可能越大。</p>
+        <div class="code-frame"><div class="code-head"><span class="code-file">trainer_colocate_async.py</span><button class="copy-btn">复制</button></div><pre><code>def on_sample_end(self):
+    self.checkpoint_manager.abort_replicas()
+    self.checkpoint_manager.sleep_replicas()
 
-        <div class="code-frame"><div class="code-head"><span class="code-file">off_policy_control.yaml</span><button class="copy-btn">复制</button></div><pre><code>trainer:
-  v1:
-    sampler:
-      max_off_policy_threshold: 8
-      max_off_policy_strategy: drop  # 或 wait</code></pre></div>
+def on_step_end(self):
+    self.checkpoint_manager.update_weights(
+        self.global_steps
+    )
+    self.checkpoint_manager.resume_generation_replicas()</code></pre></div>
 
-        <p>V1 sampler 可以限制可接受的版本跨度，并丢弃过旧数据。工程上要调的是三者平衡：rollout 吞吐、参数同步频率和 off-policy 偏差，而不是一味追求“越异步越好”。</p>
+        <p>所以 colocate 模式可以让 prompt 以异步任务方式进入队列，也支持 partial rollout，但同一批 GPU 仍要在训练和推理之间切换。只有 separate 模式给 Rollouter 单独分配节点和 GPU 后，两种重计算才有条件真正重叠。</p>
 
-        <h2>怎样选择模式</h2>
-        <ul>
-          <li>单机或 GPU 紧张：先用 <code>colocate_async</code>，它主要解决 prompt 长尾和队列调度。</li>
-          <li>有独立训练与推理资源：使用 <code>separate_async</code>，并从较小的 <code>parameter_sync_step</code> 开始。</li>
-          <li>只设置 <code>rollout.mode=async</code>：得到异步 rollout 接口，不等于异步训练流水线。</li>
-        </ul>
+        <h2>我会从什么配置开始试</h2>
 
-        <div class="warning"><strong>版本提示：</strong>上述 <code>trainer.v1.trainer_mode</code> 来自 verl main 的 0.9.0.dev 代码。verl 0.8.0 的全异步入口仍位于 <code>verl.experimental.fully_async_policy</code>，由 <code>fully_async_main</code> 同时启动 Trainer 与 Rollouter；两套配置不要混用。</div>
+        <p>如果目标是理解算法或排查 reward，我仍会先用 <code>sync</code>。异步系统里，生成顺序、模型版本和队列等待都会进入变量空间；基础 loss 都没对齐时就上异步，很难判断问题来自算法还是调度。</p>
 
-        <h2>结论</h2>
-        <p>verl 的异步 RL 可以归结为一条清晰边界：组内 response 等齐，组间异步流动；Trainer 可以多次更新参数，Rollouter 再按设定频率接收新权重。理解这两个层次，才能正确解释 batch、group、参数更新、权重同步和 stale trajectory。</p>
+        <p>资源有限但长 prompt 很多时，我会先试 colocate：</p>
 
-        <h2>源码索引</h2>
+        <div class="code-frame"><div class="code-head"><span class="code-file">colocate_async overrides</span><button class="copy-btn">复制</button></div><pre><code>trainer.use_v1=true
+trainer.v1.trainer_mode=colocate_async
+trainer.v1.colocate_async.num_warmup_batches=1</code></pre></div>
+
+        <p>有独立 rollout 节点时，再切 separate。下面只列与异步直接相关的 override；模型、数据和算法配置仍要沿用具体 recipe：</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">separate_async overrides</span><button class="copy-btn">复制</button></div><pre><code>trainer.use_v1=true
+trainer.v1.trainer_mode=separate_async
+trainer.v1.separate_async.num_warmup_batches=1
+trainer.v1.separate_async.parameter_sync_step=4
+
+trainer.v1.sampler.max_off_policy_threshold=8
+trainer.v1.sampler.max_off_policy_strategy=drop
+
+actor_rollout_ref.rollout.nnodes=1
+actor_rollout_ref.rollout.n_gpus_per_node=8
+actor_rollout_ref.rollout.checkpoint_engine.backend=nccl</code></pre></div>
+
+        <p>配置能启动只是第一步。我会同时看四组指标：Rollout 与 Trainer 的 GPU 利用率、ReplayBuffer 中 pending/running/finished 的数量、被丢弃样本数，以及 trajectory span / staleness。若队列越堆越长，优先增加 rollout 吞吐或降低提交速度；若队列很空而 Trainer 在等数据，问题多半在生成端；若 stale 样本大量被 drop，则应减小 <code>parameter_sync_step</code>、降低 warmup/在途量，或者提高权重同步频率。</p>
+
+        <p>最后补充我实际查版本时遇到的差异：PyPI/tag v0.8.0 里还没有这套 V1 <code>trainer_mode</code> 目录，全异步训练入口位于 <code>verl.experimental.fully_async_policy.fully_async_main</code>；main 的 0.9.0.dev 才把 <code>sync</code>、<code>colocate_async</code>、<code>separate_async</code> 统一接入 <code>main_ppo</code>。网上 recipe 混着抄时，最先应该核对的不是参数名，而是代码 commit。</p>
+
+        <h2>读完以后，我对“异步”的理解</h2>
+
+        <p>verl 这套实现里，异步不是一个布尔开关，而是三个相互牵制的边界：group 何时完整，Trainer 一次向前走多少个局部更新，Rollouter 何时接收新权重。TransferQueue 解决生产者和消费者解耦，ReplayBuffer 决定哪些 group 此刻能被消费，<code>parameter_sync_step</code> 则决定训练策略与行为策略最多能拉开多快。</p>
+
+        <p>回到最初的问题：一个 batch 不是一个 GRPO group；一个 batch 由多个 prompt group 组成，每个 group 再展开为 <code>rollout.n</code> 条 trajectory。actor 的一次本地更新也不等于一次 rollout 权重同步。把这两个层次分开，后面的吞吐、off-policy 和参数版本问题才有统一的解释。</p>
+
+        <h2>源码位置</h2>
         <ol class="references">
-          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/config/ppo_trainer.yaml#L200-L236">V1 trainer mode 与 sampler 配置</a></li>
-          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/agent_loop_tq.py#L54-L128">AgentLoop：一个 prompt 内并发生成 n 条 response</a></li>
-          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/replay_buffer.py#L143-L238">ReplayBuffer：按完整 prompt group 采样</a></li>
-          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_separate_async.py#L37-L88">SeparateAsyncTrainer：资源与参数同步约束</a></li>
-          <li><a href="https://verl.readthedocs.io/en/latest/advance/fully_async.html">verl 官方 Fully Async 文档</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/config/ppo_trainer.yaml#L200-L236">ppo_trainer.yaml：V1 Trainer mode 与 sampler 配置</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/main_ppo.py#L129-L179">main_ppo.py：Trainer 类选择与 V1 入口</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/agent_loop_tq.py#L54-L128">agent_loop_tq.py：prompt 与 group 内部并发</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/replay_buffer.py#L143-L238">replay_buffer.py：group 采样与 stale sample 淘汰</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_base.py#L418-L495">trainer_base.py：局部更新循环</a></li>
+          <li><a href="https://github.com/verl-project/verl/blob/e5687fce0516d31e1fdc4580499074a9bd94c751/verl/trainer/ppo/v1/trainer_separate_async.py#L37-L130">trainer_separate_async.py：资源约束与权重同步</a></li>
+          <li><a href="https://verl.readthedocs.io/en/latest/advance/fully_async.html">verl Fully Async 官方文档</a></li>
         </ol>
       </article>
     </div>

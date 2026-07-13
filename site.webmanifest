@@ -1,7 +1,7 @@
 {
-  "name": "changzhonghao 的技术博客",
-  "short_name": "changzhonghao",
-  "description": "DeepSearch、多模态 Agent 与后训练研究笔记",
+  "name": "常中豪的技术博客",
+  "short_name": "常中豪",
+  "description": "分享研究和学习记录，以及有趣的研究",
   "lang": "zh-CN",
   "start_url": "./",
   "display": "standalone",

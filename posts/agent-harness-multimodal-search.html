@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>多模态 DeepSearch 的训练路线｜changzhonghao</title>
+  <title>多模态 DeepSearch 的训练路线｜常中豪</title>
   <meta name="description" content="对照 MMSearch-R1、DeepMMSearch-R1、Vision-DeepResearch 与 OpenSearch-VL 的数据、工具、Harness 和训练配置。" />
   <meta name="theme-color" content="#f4f3d9" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/agent-harness-multimodal-search.html" />
   <meta property="og:locale" content="zh_CN" />
   <meta property="og:type" content="article" />
-  <meta property="og:site_name" content="changzhonghao 的技术博客" />
+  <meta property="og:site_name" content="常中豪的技术博客" />
   <meta property="og:title" content="多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness" />
   <meta property="og:description" content="逐项核对样本规模、训练设置、搜索工具、长轨迹 Harness 与失败处理。" />
   <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/agent-harness-multimodal-search.html" />
@@ -22,7 +22,7 @@
   <div class="progress"></div>
   <header class="site-header">
     <nav class="nav" aria-label="主导航">
-      <a class="brand" href="../index.html"><span class="brand-mark">C</span><span>changzhonghao 的技术博客</span><span class="brand-note">关于模型、搜索与训练</span></a>
+      <a class="brand" href="../index.html"><span class="brand-mark">常</span><span>常中豪的技术博客</span><span class="brand-note">关于模型、搜索与训练</span></a>
       <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
       <div class="nav-links" id="site-navigation"><a href="../index.html">首页</a><a href="../archives.html">归档</a><a href="../about.html">关于</a><button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button></div>
     </nav>
@@ -30,13 +30,12 @@
 
   <main class="article-shell">
     <header class="article-masthead">
-      <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a> » 文献调研</p>
+      <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
       <div class="article-headline">
-        <div class="article-kicker">Multimodal DeepSearch · Literature Review</div>
         <h1>多模态 DeepSearch 的训练路线：四篇工作的数据、工具与 Harness</h1>
         <p class="article-deck">只看 benchmark 分数，很难判断一个系统到底学会了搜索，还是碰巧接上了更强的搜索服务。本文把四篇工作放进同一套坐标：数据怎样生成、模型看见什么 observation、工具如何执行、SFT/RL 怎样训练，以及长轨迹失败后如何处理。</p>
       </div>
-      <div class="article-side-meta"><strong>changzhonghao</strong>2026 年 7 月 12 日 · 约 32 分钟</div>
+      <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 12 日</div>
     </header>
 
     <div class="article-layout">
@@ -268,7 +267,7 @@ keep = answer_judge(full_trace.answer, ground_truth)</code></pre></div>
     </div>
   </main>
 
-  <footer class="footer"><div class="footer-inner"><span>© 2026 changzhonghao</span><span>Multimodal DeepSearch · Literature Review</span><a href="deepsearch-from-zero.html">← 上一篇：拆解一条训练轨迹</a></div></footer>
+  <footer class="footer"><div class="footer-inner"><span>© 2026 常中豪</span><span>研究与学习记录。</span><a href="deepsearch-from-zero.html">← 上一篇：Agent Search 轨迹</a></div></footer>
   <script src="../assets/app.js?v=3"></script>
 </body>
 </html>

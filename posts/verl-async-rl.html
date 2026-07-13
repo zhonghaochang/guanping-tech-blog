@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>我在 verl 里读异步强化学习：Group、队列与权重同步｜常中豪</title>
+  <title>verl 里的异步强化学习｜常中豪</title>
   <meta name="description" content="一篇沿 verl V1 PPO 源码展开的异步强化学习阅读笔记：从 GRPO group、TransferQueue 和 ReplayBuffer，一直读到本地更新、权重同步与策略滞后。" />
   <meta name="theme-color" content="#f4f3d9" />
   <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/verl-async-rl.html" />
   <meta property="og:locale" content="zh_CN" />
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="常中豪的技术博客" />
-  <meta property="og:title" content="我在 verl 里读异步强化学习：Group、队列与权重同步" />
+  <meta property="og:title" content="verl 里的异步强化学习" />
   <meta property="og:description" content="从一处 batch 疑问出发，沿 verl 源码看异步 rollout、GRPO group、本地参数更新与 rollout 权重同步。" />
   <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/verl-async-rl.html" />
   <meta property="article:published_time" content="2026-07-13" />
@@ -32,7 +32,7 @@
     <header class="article-masthead">
       <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
       <div class="article-headline">
-        <h1>我在 verl 里读异步强化学习：Group、队列与权重同步</h1>
+        <h1>verl 里的异步强化学习</h1>
         <p class="article-deck">最初只是想确认“一个 batch 是不是一个 GRPO group”，结果顺着这个问题一路读到了 TransferQueue、ReplayBuffer、局部更新和策略滞后。这篇把我的阅读路径和算例完整记下来。</p>
       </div>
       <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 13 日 · verl main <code>e5687fce</code></div>

@@ -44,17 +44,37 @@
 
         <p>我读的是 verl main 分支的 <code>e5687fce</code>，源码版本标记为 0.9.0.dev。下面不按配置项逐条翻译，而是从一个 prompt 进入系统开始，追到 actor 完成更新、Rollouter 收到新权重为止。这样更容易看清每个 batch 到底在哪里被切开，又在哪里重新合并。</p>
 
-        <h2>先把 batch 的账算清楚</h2>
+        <nav class="article-index" aria-label="文章目录">
+          <p class="article-index-title">目录</p>
+          <ol>
+            <li><a href="#units">从 batch、group 和 trajectory 说起</a></li>
+            <li><a href="#async-layers">verl 代码里的两层 async</a></li>
+            <li><a href="#data-flow">从 prompt 到 ReplayBuffer</a></li>
+            <li><a href="#updates">本地更新与权重同步</a></li>
+            <li><a href="#staleness">吞吐提升与策略滞后</a></li>
+            <li><a href="#modes">三种模式与配置方法</a></li>
+            <li><a href="#toy-code">一个可运行的异步 group 示例</a></li>
+            <li><a href="#conclusion">回到最初的问题</a></li>
+          </ol>
+        </nav>
+
+        <h2 id="units">1. 从 batch、group 和 trajectory 说起</h2>
+
+        <h3>1.1 一个 prompt 对应一个统计组</h3>
 
         <p>设一次从数据集取出 <em>B</em> 个 prompt。对第 <em>i</em> 个 prompt <em>q<sub>i</sub></em>，策略采样 <em>G</em> 个回答：</p>
 
         <div class="equation">𝒢<sub>i</sub> = { y<sub>i,1</sub>, y<sub>i,2</sub>, …, y<sub>i,G</sub> }, &nbsp; y<sub>i,j</sub> ∼ π<sub>old</sub>(· | q<sub>i</sub>)</div>
         <p class="equation-note">𝒢<sub>i</sub> 是一个 GRPO group；G 在 verl 配置里对应 rollout.n。</p>
 
+        <h3>1.2 Group 为什么必须完整</h3>
+
         <p>GRPO 不训练单独的 value model，而是在同一 prompt 的回答之间构造相对基线。最常见的组内标准化写法是：</p>
 
         <div class="equation">Â<sub>i,j</sub> = ( r<sub>i,j</sub> − μ<sub>i</sub> ) / ( σ<sub>i</sub> + ε )</div>
         <p class="equation-note">μ<sub>i</sub> 与 σ<sub>i</sub> 都只由第 i 个 prompt 的 G 个 reward 计算。</p>
+
+        <h3>1.3 64 个 prompt、每题 8 个回答</h3>
 
         <p>因此，group 是 advantage 的统计边界，不是训练 batch 本身。若 <code>train_batch_size=64</code>、<code>rollout.n=8</code>，数据规模是：</p>
 
@@ -71,7 +91,9 @@
 
         <p>这里还有一个对异步调度很关键的约束：可以让 prompt A 和 prompt C 先于 prompt B 进入训练，但不能随便拿 A 已完成的 3 个回答和未完成的 5 个回答去算组内 advantage。异步发生在 group 之间，组内仍需要一个完整的比较集合。</p>
 
-        <h2>我踩的第一个坑：代码里有两种 async</h2>
+        <h2 id="async-layers">2. verl 代码里的两层 async</h2>
+
+        <h3>2.1 <code>rollout.mode=async</code> 控制什么</h3>
 
         <p>我一开始盯着 <code>actor_rollout_ref.rollout.mode=async</code> 看了很久，后来才发现当前 main 分支中同步 rollout 已经被删掉了。这个字段控制的是 rollout server 的调用方式，不负责安排 Trainer 与 Rollouter 是否重叠执行。</p>
 
@@ -82,6 +104,8 @@
             "Rollout mode 'sync' has been removed. "
             "Please set actor_rollout_ref.rollout.mode=async"
         )</code></pre></div>
+
+        <h3>2.2 真正选择训练调度的是 <code>trainer_mode</code></h3>
 
         <p>决定训练调度方式的是另一处配置：</p>
 
@@ -111,7 +135,21 @@ trainer.fit()</code></pre></div>
 
         <p>三个实现分别用装饰器注册为 <code>sync</code>、<code>colocate_async</code> 和 <code>separate_async</code>。所以判断一个 recipe 是否真的让训练与生成并行，我现在会先看 <code>trainer.v1.trainer_mode</code>，再看两边是否分配了独立 GPU；单看 rollout 的 <code>mode</code> 已经没有判断力。</p>
 
-        <h2>Prompt 进入 TransferQueue 以后发生了什么</h2>
+        <h3>2.3 为什么要把生成和训练做成流水线</h3>
+
+        <p>设 Rollouter 每秒能产出 λ<sub>r</sub> 个完整 group，Trainer 每秒能消费 λ<sub>t</sub> 个 group。同步执行时，一轮时间近似是生成、训练和权重同步三段相加：</p>
+
+        <div class="equation">T<sub>sync</sub> ≈ T<sub>rollout</sub> + T<sub>train</sub> + T<sub>weight-sync</sub></div>
+
+        <p>流水线进入稳态以后，两端同时工作，系统吞吐由更慢的一端决定：</p>
+
+        <div class="equation">λ<sub>async</sub> ≈ min(λ<sub>r</sub>, λ<sub>t</sub>)</div>
+
+        <p>队列长度的变化可以写成 <code>dN/dt = λ_r − λ_t</code>。如果 λ<sub>r</sub> 长期大于 λ<sub>t</sub>，TransferQueue 会持续积压，轨迹版本也越来越旧；反过来，Trainer 就会在 ReplayBuffer 上等数据。异步系统真正要做的不是把队列塞满，而是让生产和消费速率尽量接近。</p>
+
+        <h2 id="data-flow">3. 从 prompt 到 ReplayBuffer</h2>
+
+        <h3>3.1 Trainer 先登记 prompt，再提交生成</h3>
 
         <p>V1 Trainer 不再要求“生成函数返回一个完整 TensorDict，我才继续往下走”。它先给每个 prompt 分配 uid，把 prompt 作为一条状态记录写进 TransferQueue，然后把真正的生成工作交给 AgentLoopManager。</p>
 
@@ -130,6 +168,8 @@ trainer.fit()</code></pre></div>
     self.agent_loop_manager.generate_sequences(batch)</code></pre></div>
 
         <p>这里的 <code>global_steps</code> 不只是日志步数。后面 ReplayBuffer 用它判断轨迹由哪个策略版本生成，以及这份数据相对当前模型已经旧了多少。</p>
+
+        <h3>3.2 AgentLoop 的两层并发</h3>
 
         <p>AgentLoop 这一侧有两层并发。外层按 prompt 创建 background task，不等待结果返回；内层再按照 <code>rollout.n</code> 为同一个 prompt 创建多个 session。</p>
 
@@ -170,7 +210,7 @@ prompt D   pending
 ReplayBuffer 可以先取 A、C；不需要等 B。
 但 A0~A7 仍作为同一个 group 被取走。</code></pre></div>
 
-        <h2>ReplayBuffer 并不只是一个“先进先出队列”</h2>
+        <h3>3.3 ReplayBuffer 不只是先进先出</h3>
 
         <p>我原先以为 ReplayBuffer 只是把完成的数据攒够一个 batch。实际读下来，它还承担了 group 边界、旧数据优先级和 off-policy 淘汰三件事。</p>
 
@@ -198,7 +238,9 @@ for key, tag in self.partitions[partition_id].items():
 
         <p>另一个值得注意的地方是采样单位。<code>batch_size</code> 先选 prompt uid，选中后再把这个 uid 下的 trajectory 展开。因此在这条 V1 路径里，ReplayBuffer 接收的 batch size 是 group 数，而不是展开后的 response 数。</p>
 
-        <h2>取到数据以后，参数究竟更新了几次</h2>
+        <h2 id="updates">4. 本地更新与权重同步</h2>
+
+        <h3>4.1 <code>_step_once</code> 做了哪些计算</h3>
 
         <p><code>trainer_base.py</code> 的 <code>_step_once</code> 很适合用来核对一轮训练到底包含什么。删掉计时和可选分支后，主干大致是：</p>
 
@@ -232,7 +274,7 @@ batch = self._update_actor(batch)</code></pre></div>
         <div class="equation">J(θ) = 𝔼[min(ρ<sub>i,j,t</sub>Â<sub>i,j</sub>, clip(ρ<sub>i,j,t</sub>, 1−ε, 1+ε)Â<sub>i,j</sub>)]</div>
         <p class="equation-note">不同 recipe 还会叠加 KL、熵正则、长度归一化或 rollout correction；这里保留与异步问题直接相关的主项。</p>
 
-        <h2>用 64 个 prompt 把 parameter_sync_step 跑一遍</h2>
+        <h3>4.2 用 64 个 prompt 跑一遍 <code>parameter_sync_step</code></h3>
 
         <p><code>parameter_sync_step</code> 是我第二次读源码才真正分清的参数。它不是“多少 batch 才更新 actor”，而是一次全局 step 内做多少次本地训练更新，然后再把权重推给 Rollouter。</p>
 
@@ -290,11 +332,15 @@ local update 4: 16 groups × 8 = 128 trajectories → actor update
 -----------------------------------------------------------------
 global step:    64 groups × 8 = 512 trajectories → sync weights</code></pre></div>
 
+        <h3>4.3 Local update、optimizer step 和 weight sync</h3>
+
         <p>更严谨地说，Trainer 执行了 4 次 <code>_update_actor</code> 调用。每次调用内部还会受 <code>ppo_epochs</code>、data parallel 切分和 micro-batch 影响，不能直接把“4 次 local update”写成“恰好 4 次 <code>optimizer.step()</code>”。默认 <code>ppo_epochs=1</code> 时两者比较接近，但换了 recipe 就未必成立。</p>
 
         <p>直到外层 step 结束，<code>on_step_end</code> 才调用 <code>standalone_checkpoint_manager.update_weights(self.global_steps)</code>，把当前参数同步给独立的 rollout replicas。于是，“一个 batch 更新一次参数”这句话少了主语：Trainer 内部有自己的优化步，推理端看到新参数则由权重同步边界决定。</p>
 
-        <h2>异步训练省下了等待，也引入了策略滞后</h2>
+        <h2 id="staleness">5. 吞吐提升以后，策略滞后怎么算</h2>
+
+        <h3>5.1 Behavior policy 与当前策略</h3>
 
         <p>同步训练中，数据大致由当前策略 π<sub>old</sub> 生成，更新时两者距离有限。分离式异步训练里，Rollouter 可能还在用版本 <em>v</em>，Trainer 已经更新到 <em>v+k</em>。更准确地写，轨迹来自 behavior policy μ：</p>
 
@@ -322,6 +368,8 @@ if bypass_recomputing_logprobs:
 
         <p>版本差距越大，ratio 越容易离开 clipping 区间，大量 token 的梯度会被裁掉；更糟时，旧策略覆盖的回答区域已经偏离当前策略，希望靠有限样本做 importance correction 也会变得不稳定。所以异步的收益不是免费的，它用一定程度的 off-policy 偏差换设备利用率。</p>
 
+        <h3>5.2 <code>drop</code> 与 <code>wait</code> 怎样处理旧数据</h3>
+
         <p>verl V1 用 <code>max_off_policy_threshold</code> 限制轨迹跨越的模型版本数。<code>drop</code> 策略的判断很直接：</p>
 
         <div class="code-frame"><div class="code-head"><span class="code-file">replay_buffer.py · 丢弃过旧样本</span><button class="copy-btn">复制</button></div><pre><code>prompt_step = tag["global_steps"]
@@ -334,6 +382,8 @@ else:
 
         <p>配置里还提供 <code>wait</code>。它不是不管旧数据，而是在 pending/running group 即将达到阈值时，阻止训练继续向前冲，等这些 group 完成。<code>drop</code> 保吞吐但浪费生成算力，<code>wait</code> 保样本但可能重新引入等待，两者没有普遍更优的答案。</p>
 
+        <h3>5.3 Partial rollout 会让一条轨迹跨版本</h3>
+
         <p>partial rollout 还会带来“同一条 trajectory 跨多个模型版本”的情况。Trainer 已经记录了 <code>min_global_steps</code> 与 <code>max_global_steps</code>，并计算：</p>
 
         <div class="equation">span = v<sub>max</sub> − v<sub>min</sub> + 1</div>
@@ -341,7 +391,9 @@ else:
 
         <p>这几个指标比单看 generation latency 更有用。若吞吐提高了，但 <code>trajectory_spans/max</code> 和 <code>trajectory_staleness_worst/mean</code> 同时快速上升，说明系统只是把 GPU 空转问题换成了更严重的策略偏差。</p>
 
-        <h2>三种 Trainer mode 放在一起看</h2>
+        <h2 id="modes">6. 三种模式、配置方法和常见报错</h2>
+
+        <h3>6.1 Sync、colocate 和 separate 的资源差别</h3>
 
         <div class="table-wrap"><table>
           <thead><tr><th>模式</th><th>GPU 布局</th><th>训练期间的 Rollout</th><th>更适合什么情况</th></tr></thead>
@@ -366,7 +418,7 @@ def on_step_end(self):
 
         <p>所以 colocate 模式可以让 prompt 以异步任务方式进入队列，也支持 partial rollout，但同一批 GPU 仍要在训练和推理之间切换。只有 separate 模式给 Rollouter 单独分配节点和 GPU 后，两种重计算才有条件真正重叠。</p>
 
-        <h2>我会从什么配置开始试</h2>
+        <h3>6.2 我会从什么配置开始试</h3>
 
         <p>如果目标是理解算法或排查 reward，我仍会先用 <code>sync</code>。异步系统里，生成顺序、模型版本和队列等待都会进入变量空间；基础 loss 都没对齐时就上异步，很难判断问题来自算法还是调度。</p>
 
@@ -394,7 +446,183 @@ actor_rollout_ref.rollout.checkpoint_engine.backend=nccl</code></pre></div>
 
         <p>最后补充我实际查版本时遇到的差异：PyPI/tag v0.8.0 里还没有这套 V1 <code>trainer_mode</code> 目录，全异步训练入口位于 <code>verl.experimental.fully_async_policy.fully_async_main</code>；main 的 0.9.0.dev 才把 <code>sync</code>、<code>colocate_async</code>、<code>separate_async</code> 统一接入 <code>main_ppo</code>。网上 recipe 混着抄时，最先应该核对的不是参数名，而是代码 commit。</p>
 
-        <h2>读完以后，我对“异步”的理解</h2>
+        <h3>6.3 我实际会先排查的几个错误</h3>
+
+        <div class="table-wrap"><table>
+          <thead><tr><th>现象</th><th>对应的源码约束</th><th>先检查什么</th></tr></thead>
+          <tbody>
+            <tr><td>启动时提示 batch size 不相等</td><td><code>train_batch_size == parameter_sync_step × ppo_mini_batch_size</code></td><td>三个量是否按 prompt group 计数</td></tr>
+            <tr><td>separate async 拒绝启动</td><td>rollout 的 <code>nnodes</code>、<code>n_gpus_per_node</code> 必须大于 0</td><td>是否真的为 Rollouter 分了独立资源</td></tr>
+            <tr><td>checkpoint backend 报错</td><td>separate 模式不接受 <code>naive</code></td><td>按环境选择 NCCL、NIXL、Mooncake 等后端</td></tr>
+            <tr><td>Trainer 经常等数据</td><td>ReplayBuffer 的完整 group 不足 <code>sample_batch_size</code></td><td>生成吞吐、超时率和 group failure 数</td></tr>
+            <tr><td>大量样本被丢弃</td><td>轨迹版本跨度超过 <code>max_off_policy_threshold</code></td><td>同步频率、warmup 数量与队列积压</td></tr>
+          </tbody>
+        </table></div>
+
+        <p>我不建议一看到 dropped sample 就把 threshold 调大。阈值变大只是让更多旧数据通过，并没有消除 behavior policy 与当前策略之间的距离。更有信息量的做法是先画出 staleness 分布，再对照 Rollout/Trainer 两端吞吐定位瓶颈。</p>
+
+        <h2 id="toy-code">7. 一个可运行的异步 group 示例</h2>
+
+        <p>下面这段代码不依赖 verl，也不训练语言模型。它只复现最容易混淆的调度语义：每个 prompt 内部并发生成 <code>G</code> 条 trajectory；等 group 完整后才进入 ready queue；Trainer 每次消费若干完整 group。把它保存为 <code>async_group_demo.py</code> 可以直接运行。</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">async_group_demo.py</span><button class="copy-btn">复制</button></div><pre><code>import asyncio
+import random
+from dataclasses import dataclass
+from statistics import fmean, pstdev
+
+
+GROUP_SIZE = 4
+TRAIN_BATCH_GROUPS = 2
+NUM_PROMPTS = 6
+
+
+@dataclass
+class Trajectory:
+    prompt_id: int
+    sample_id: int
+    behavior_version: int
+    reward: float
+    advantage: float = 0.0
+
+
+async def generate_one(
+    prompt_id: int,
+    sample_id: int,
+    behavior_version: int,
+) -&gt; Trajectory:
+    # 模拟不同 response 的生成时延
+    await asyncio.sleep(random.uniform(0.05, 0.35))
+    reward = round(random.uniform(0.0, 1.0), 3)
+    return Trajectory(
+        prompt_id=prompt_id,
+        sample_id=sample_id,
+        behavior_version=behavior_version,
+        reward=reward,
+    )
+
+
+def normalize_group(group: list[Trajectory]) -&gt; None:
+    rewards = [x.reward for x in group]
+    mean = fmean(rewards)
+    std = max(pstdev(rewards), 1e-6)
+    for trajectory in group:
+        trajectory.advantage = (
+            trajectory.reward - mean
+        ) / std
+
+
+async def rollout_group(
+    prompt_id: int,
+    behavior_version: int,
+    ready_queue: asyncio.Queue,
+) -&gt; None:
+    # 对应 AgentLoop 中一个 prompt 的 n 个 session
+    tasks = [
+        generate_one(prompt_id, sample_id, behavior_version)
+        for sample_id in range(GROUP_SIZE)
+    ]
+
+    # gather 返回前，整个 group 不会进入 ready_queue
+    group = await asyncio.gather(*tasks)
+    normalize_group(group)
+
+    await ready_queue.put(group)
+    rewards = [x.reward for x in group]
+    print(f"ready prompt={prompt_id}, rewards={rewards}")
+
+
+async def trainer(
+    ready_queue: asyncio.Queue,
+    total_groups: int,
+) -&gt; None:
+    consumed = 0
+    current_version = 1
+
+    while consumed &lt; total_groups:
+        # 一次拿 TRAIN_BATCH_GROUPS 个完整 group
+        batch = [
+            await ready_queue.get()
+            for _ in range(TRAIN_BATCH_GROUPS)
+        ]
+        consumed += len(batch)
+
+        trajectories = [x for group in batch for x in group]
+        prompt_ids = [group[0].prompt_id for group in batch]
+        behavior_versions = sorted({
+            x.behavior_version for x in trajectories
+        })
+        staleness = current_version - max(behavior_versions)
+
+        print(
+            "train",
+            f"prompts={prompt_ids}",
+            f"trajectories={len(trajectories)}",
+            f"behavior_versions={behavior_versions}",
+            f"current_version={current_version}",
+            f"staleness={staleness}",
+        )
+
+        # 这里只模拟 Trainer 完成一次本地更新
+        await asyncio.sleep(0.15)
+        current_version += 1
+
+        for _ in batch:
+            ready_queue.task_done()
+
+
+async def main() -&gt; None:
+    random.seed(7)
+    ready_queue = asyncio.Queue(maxsize=4)
+
+    trainer_task = asyncio.create_task(
+        trainer(ready_queue, total_groups=NUM_PROMPTS)
+    )
+
+    rollout_tasks = [
+        rollout_group(
+            prompt_id=i,
+            behavior_version=0,
+            ready_queue=ready_queue,
+        )
+        for i in range(NUM_PROMPTS)
+    ]
+
+    await asyncio.gather(*rollout_tasks)
+    await ready_queue.join()
+    await trainer_task
+
+
+if __name__ == "__main__":
+    asyncio.run(main())</code></pre></div>
+
+        <h3>7.1 运行时应该观察什么</h3>
+
+        <p>输出中的 prompt 顺序通常不是 <code>0, 1, 2, 3...</code>，而是由最慢的 response 决定。例如 prompt 2 可能先完整生成，于是先进入 queue；Trainer 凑够两个 group 后就开工，不等剩余 prompt。</p>
+
+        <div class="code-frame"><div class="code-head"><span class="code-file">本地运行输出（Python 3.11）</span><button class="copy-btn">复制</button></div><pre><code>ready prompt=2, rewards=[0.144, 0.314, 0.816, 0.582]
+ready prompt=1, rewards=[0.453, 0.206, 0.308, 0.586]
+train prompts=[2, 1] trajectories=8 behavior_versions=[0] current_version=1 staleness=1
+
+ready prompt=0, rewards=[0.06, 0.372, 0.699, 0.181]
+ready prompt=3, rewards=[0.428, 0.244, 0.639, 0.548]
+train prompts=[0, 3] trajectories=8 behavior_versions=[0] current_version=2 staleness=2</code></pre></div>
+
+        <h3>7.2 这段代码与 verl 源码怎样对应</h3>
+
+        <div class="table-wrap"><table>
+          <thead><tr><th>示例代码</th><th>verl 中的对应角色</th></tr></thead>
+          <tbody>
+            <tr><td><code>rollout_group</code></td><td><code>AgentLoopWorkerTQ._run_prompt</code></td></tr>
+            <tr><td><code>asyncio.gather(*tasks)</code></td><td>等待一个 prompt 的 n 个 session 完成</td></tr>
+            <tr><td><code>ready_queue.put(group)</code></td><td>TransferQueue 把 prompt 状态标记为 finished</td></tr>
+            <tr><td>Trainer 按 group 取 batch</td><td><code>ReplayBuffer.sample</code></td></tr>
+            <tr><td><code>current_version</code></td><td><code>global_steps</code> / rollout 权重版本</td></tr>
+          </tbody>
+        </table></div>
+
+        <p>这个最小实现故意没有加入 Ray、vLLM、FSDP 和真实 optimizer。把这些基础设施全部拿掉以后，异步训练最小的正确单元仍然是：<strong>完整 group 进入队列，Trainer 按 group 消费，生成策略版本随 trajectory 保存。</strong></p>
+
+        <h2 id="conclusion">8. 回到最初的问题</h2>
 
         <p>verl 这套实现里，异步不是一个布尔开关，而是三个相互牵制的边界：group 何时完整，Trainer 一次向前走多少个局部更新，Rollouter 何时接收新权重。TransferQueue 解决生产者和消费者解耦，ReplayBuffer 决定哪些 group 此刻能被消费，<code>parameter_sync_step</code> 则决定训练策略与行为策略最多能拉开多快。</p>
 

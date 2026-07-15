@@ -1,0 +1,5 @@
+# Core reference implementation uses Python standard library only.
+# Optional token-level GRPO integration:
+torch>=2.3
+# Optional tests:
+pytest>=8.0

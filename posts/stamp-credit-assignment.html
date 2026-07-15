@@ -1,0 +1,1126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>STAMP 详解：DeepSearch 的证据溯源信用分配｜常中豪</title>
+  <meta name="description" content="拆解 STAMP 如何把 DeepSearch 的最终奖励追溯到真正找到证据的搜索动作，包含公式、数值案例、实验分析与参考实现。" />
+  <meta name="theme-color" content="#f4f3d9" />
+  <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/stamp-credit-assignment.html" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="常中豪的技术博客" />
+  <meta property="og:title" content="STAMP 详解：DeepSearch 的证据溯源信用分配" />
+  <meta property="og:description" content="从奖励—信用错配、证据验证和 First Exposure，到 GRPO 的保号优势调制。" />
+  <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/stamp-credit-assignment.html" />
+  <meta property="article:published_time" content="2026-07-15" />
+  <meta name="twitter:card" content="summary" />
+  <link rel="icon" href="../assets/favicon.svg" />
+  <link rel="stylesheet" href="../assets/styles.css?v=13" />
+  <script>window.MathJax = {tex: {inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']]}};</script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body>
+  <div class="progress"></div>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="../index.html"><span class="brand-mark">常</span><span>常中豪的技术博客</span><span class="brand-note">关于模型、搜索与训练</span></a>
+      <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
+      <div class="nav-links" id="site-navigation"><a href="../index.html">首页</a><a href="../archives.html">归档</a><a href="../about.html">关于</a><button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button></div>
+    </nav>
+  </header>
+
+  <main class="article-shell">
+    <header class="article-masthead">
+      <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
+      <div class="article-headline">
+        <h1>STAMP 详解：如何把 DeepSearch 的最终奖励追溯到真正找到证据的搜索动作</h1>
+        <p class="article-deck">从奖励—信用错配、训练期证据图、LLM 证据验证和 First Exposure 归因，一直讲到 GRPO 的步骤级优势调制与参考实现。</p>
+      </div>
+      <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 15 日</div>
+    </header>
+
+    <div class="article-layout">
+      <article class="article stamp-article">
+        <div class="note"><strong>相关材料：</strong><a href="../assets/downloads/stamp/2607.11172v1.pdf">论文 PDF</a> · <a href="../assets/downloads/stamp/stamp_reference_impl.py">参考实现</a> · <a href="../assets/downloads/stamp/test_stamp_reference_impl.py">单元测试</a> · <a href="../assets/downloads/stamp/requirements.txt">依赖说明</a>。参考实现依据论文公式重构，并非作者官方源码。</div>
+<blockquote>
+<p>论文：<strong>STAMP: Provenance-Guided Credit Assignment for Deep Search Agents</strong><br />
+作者：Ke Xu, Han Xu, Xinran Chen 等；Baidu Inc. / Peking University<br />
+版本：arXiv:2607.11172v1，2026 年 7 月 13 日<br />
+本文定位：面向研究者的中文方法拆解、公式推导、实例演算与参考实现。</p>
+</blockquote>
+<blockquote>
+<p><strong>代码说明</strong>：截至本文整理日期，论文公开页面未给出该工作的官方代码仓库。本文附带的 <a href="../assets/downloads/stamp/stamp_reference_impl.py"><code>code/stamp_reference_impl.py</code></a> 是依据论文公式、算法 1 和附录重构的教学型参考实现，并非作者官方源码。</p>
+</blockquote>
+<hr />
+<h2 id="0-一句话理解">0. 一句话理解</h2>
+<p>传统 GRPO 会把整条轨迹的同一个优势值广播给所有模型动作；STAMP 则先验证最终引用的网页支持了哪些目标实体和关系，再沿 URL 的轨迹来源回溯到这些网页<strong>第一次被暴露的 search/open 步骤</strong>，最后只在优势层面对这些步骤进行更强的正向强化或更弱的负向惩罚。</p>
+<p>核心链路是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">最终答案中的引用
+      ↓
+被 LLM 验证为支持目标实体/关系的文档
+      ↓
+轨迹日志中的 URL 首次暴露步骤
+      ↓
+步骤信用 c_t
+      ↓
+步骤级优势 A*_{i,t}
+      ↓
+该 action step 内模型生成 token 的策略梯度
+</code></pre></div>
+<p>它解决的不是“如何给整条轨迹打更好的分”，而是：</p>
+<blockquote>
+<p><strong>一条成功或失败的长搜索轨迹中，究竟哪些动作应承担更多信用？</strong></p>
+</blockquote>
+<hr />
+<h2 id="1-为什么-deepsearch-特别需要信用分配">1. 为什么 DeepSearch 特别需要信用分配</h2>
+<p>DeepSearch/DeepResearch 的一条轨迹通常包括：</p>
+<ul>
+<li>多轮问题拆解；</li>
+<li>多次 <code>search</code>；</li>
+<li>多次 <code>open/read</code>；</li>
+<li>实体消歧；</li>
+<li>证据交叉验证；</li>
+<li>最终答案和引用生成。</li>
+</ul>
+<p>普通结果监督只得到一个终局奖励：</p>
+<div class="math-block">\[
+R(\tau) \in \{0,1\}
+\]</div>
+<p>假设一条轨迹有 12 个动作，其中只有第 3、8 步真正找到关键证据，但最终答对了。普通 GRPO 会让 12 个动作共享同一个正优势。相反，如果最终答错，即使第 3 步曾经找到正确证据，也会和错误动作一起受到负向更新。</p>
+<p>论文将这种现象称为：</p>
+<blockquote>
+<p><strong>奖励—信用错配（reward-credit mismatch）</strong>。</p>
+</blockquote>
+<p>论文统计显示：</p>
+<ul>
+<li>正确轨迹中有 <strong>83.5%</strong> 的步骤没有产生目标证据；</li>
+<li>错误轨迹中仍有 <strong>7.0%</strong> 的步骤暴露了有效实体或关系证据；</li>
+<li>无目标证据轨迹准确率为 18.0%；</li>
+<li>只有实体证据时为 30.8%；</li>
+<li>获得经过关系验证的证据时为 69.1%。</li>
+</ul>
+<p>这些结果说明：最终结果和局部动作价值并不完全一致。</p>
+<hr />
+<h2 id="2-先区分四个层次-reward-credit-advantage-gradient">2. 先区分四个层次：Reward、Credit、Advantage、Gradient</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>层次</th>
+  <th>作用</th>
+  <th style="text-align:right">STAMP 是否改变</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>轨迹奖励 \(R_i\)</td>
+  <td>判断整条 rollout 的最终质量</td>
+  <td style="text-align:right">否</td>
+</tr>
+<tr>
+  <td>组相对优势 \(A_i\)</td>
+  <td>将轨迹奖励转成相对训练信号</td>
+  <td style="text-align:right">先按普通 GRPO 计算</td>
+</tr>
+<tr>
+  <td>步骤信用 \(c_{i,t}\)</td>
+  <td>判断某一步是否首次暴露有效证据</td>
+  <td style="text-align:right">是，STAMP 新增</td>
+</tr>
+<tr>
+  <td>Token 优势 \(A^*_{i,m}\)</td>
+  <td>决定模型生成 token 的更新强度</td>
+  <td style="text-align:right">是，按步骤调制</td>
+</tr>
+</tbody>
+</table></div>
+<p>因此，STAMP 并不是一个新的终局奖励函数，而是一个<strong>优势重分配机制</strong>。</p>
+<hr />
+<h2 id="3-训练期证据图-目标实体与目标关系是什么">3. 训练期证据图：目标实体与目标关系是什么</h2>
+<p>每个训练问题都配有一张训练期证据图：</p>
+<div class="math-block">\[
+G=(V,E)
+\]</div>
+<p>其中：</p>
+<ul>
+<li>\(V\)：问题涉及的实体节点；</li>
+<li>\(V_{\text{tar}}\subseteq V\)：需要通过搜索发现的隐藏目标实体；</li>
+<li>\(E\)：实体之间的事实关系；</li>
+<li>\(U_{\text{tar}}\)：用于验证的原子关系单元。</li>
+</ul>
+<h3 id="3-1-具体问题">3.1 具体问题</h3>
+<p>考虑问题：</p>
+<blockquote>
+<p>哪位演员出演过电影 <em>Sergeant York</em>，并曾与一位出演电视剧 <em>Bewitched</em> 的女演员结婚？</p>
+</blockquote>
+<p>训练期标准答案和中间实体为：</p>
+<ul>
+<li>\(E_0=\) Gig Young：最终目标演员；</li>
+<li>\(E_1=\) Elizabeth Montgomery：中间隐藏实体。</li>
+</ul>
+<p>问题中直接出现的：</p>
+<ul>
+<li><em>Sergeant York</em>；</li>
+<li><em>Bewitched</em>；</li>
+</ul>
+<p>属于已知锚点实体，不产生实体发现信用。</p>
+<p>目标关系可以拆成：</p>
+<div class="math-block">\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]</div>
+<div class="math-block">\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]</div>
+<div class="math-block">\[
+u_3: E_1 \xrightarrow{\text{appeared in}} \text{Bewitched}
+\]</div>
+<p>证据图可表示为：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">                  married to
+      Gig Young ───────────────→ Elizabeth Montgomery
+          │                              │
+          │ appeared in                  │ appeared in
+          ↓                              ↓
+   Sergeant York                      Bewitched
+</code></pre></div>
+<p>这些标准实体和关系只在训练后验验证中使用，Agent 在 rollout 时看不到它们。</p>
+<hr />
+<h2 id="4-stamp-的四阶段流水线">4. STAMP 的四阶段流水线</h2>
+<h3 id="阶段-a-完成正常-agent-rollout">阶段 A：完成正常 Agent rollout</h3>
+<p>Agent 使用两个工具：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">json</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-json">{
+  &quot;name&quot;: &quot;search&quot;,
+  &quot;description&quot;: &quot;Search the web and return URLs with snippets.&quot;
+}
+</code></pre></div>
+<div class="code-frame"><div class="code-head"><span class="code-file">json</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-json">{
+  &quot;name&quot;: &quot;open&quot;,
+  &quot;description&quot;: &quot;Open a URL and return extracted page content.&quot;
+}
+</code></pre></div>
+<p>轨迹形式是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">&lt;think&gt;...&lt;/think&gt;
+&lt;tool_call&gt;search(...)&lt;/tool_call&gt;
+&lt;tool_response&gt;...&lt;/tool_response&gt;
+&lt;think&gt;...&lt;/think&gt;
+&lt;tool_call&gt;open(...)&lt;/tool_call&gt;
+&lt;tool_response&gt;...&lt;/tool_response&gt;
+...
+&lt;final answer with citations&gt;
+</code></pre></div>
+<h3 id="阶段-b-验证最终引用文档">阶段 B：验证最终引用文档</h3>
+<p>验证 LLM 并不直接评价“哪个搜索动作写得好”，而是判断：</p>
+<ul>
+<li>哪个引用网页支持目标实体；</li>
+<li>哪个引用网页支持目标关系。</li>
+</ul>
+<h3 id="阶段-c-沿-url-来源回溯首次暴露步骤">阶段 C：沿 URL 来源回溯首次暴露步骤</h3>
+<p>程序读取完整轨迹日志，找到每个有效支持文档的 URL 首次出现在哪一步。</p>
+<h3 id="阶段-d-在-grpo-优势层进行调制">阶段 D：在 GRPO 优势层进行调制</h3>
+<p>不改变原始轨迹奖励和组内排序，只改变一条轨迹内部不同步骤的更新强度。</p>
+<hr />
+<h2 id="5-证据验证-llm-负责什么-不负责什么">5. 证据验证：LLM 负责什么，不负责什么</h2>
+<h3 id="5-1-最终引用集合">5.1 最终引用集合</h3>
+<p>设最终回答中引用、且能够和轨迹中实际观察 URL 对齐的文档集合为：</p>
+<div class="math-block">\[
+C(\tau)
+\]</div>
+<p>无法和轨迹日志匹配的虚构引用会被丢弃。</p>
+<h3 id="5-2-实体支持集合">5.2 实体支持集合</h3>
+<p>对于目标实体 \(A_i\)0，定义：</p>
+<div class="math-block">\[
+D(e)=\{d\in C(\tau):\operatorname{sup}(e,d)=1\}
+\]</div>
+<p>其中 \(A_i\)1 由 LLM verifier 判断：文档 \(A_i\)2 是否真的支持实体 \(A_i\)3 的身份。</p>
+<h3 id="5-3-关系支持集合">5.3 关系支持集合</h3>
+<p>对于目标关系单元 \(A_i\)4，定义：</p>
+<div class="math-block">\[
+D(u_k)=\{d\in C(\tau):\operatorname{sup}(c_{ij},d)=1\}
+\]</div>
+<p>关系只有在两个端点实体和关系事实都得到支持时才算验证成功：</p>
+<div class="math-block">\[
+\operatorname{verified}(u_k)
+=
+\operatorname{cov}(e_i)\operatorname{cov}(e_j)\operatorname{cov}(c_{ij})
+\]</div>
+<h3 id="5-4-llm-不做-步骤重要性打分">5.4 LLM 不做“步骤重要性打分”</h3>
+<p>STAMP 的 verifier 不会直接输出：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Step 3 很关键，奖励 0.08。
+</code></pre></div>
+<p>它输出的是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">json</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-json">{
+  &quot;E0&quot;: {
+    &quot;correct&quot;: true,
+    &quot;supported&quot;: true,
+    &quot;source_url&quot;: &quot;URL A&quot;
+  },
+  &quot;U2&quot;: {
+    &quot;supported&quot;: true,
+    &quot;source_url&quot;: &quot;URL A&quot;
+  }
+}
+</code></pre></div>
+<p>“关键步骤”是随后由确定性的 URL 首次暴露规则推导出来的。</p>
+<hr />
+<h2 id="6-文档级信用-每个有效证据单元贡献固定预算">6. 文档级信用：每个有效证据单元贡献固定预算</h2>
+<p>论文设置每个实体或关系单元的信用量为：</p>
+<div class="math-block">\[
+\delta=0.03
+\]</div>
+<h3 id="6-1-实体信用">6.1 实体信用</h3>
+<p>若实体 \(A_i\)5 由多个文档共同支持，信用在这些文档之间平均分配：</p>
+<p>\[
+G=(V,E)
+\]0</p>
+<h3 id="6-2-关系信用">6.2 关系信用</h3>
+<p>\[
+G=(V,E)
+\]1</p>
+<p>一篇文档如果同时支持实体和关系，可以从两个通道都获得信用。</p>
+<p>这种平均分配不学习网页权重，优点是可复现；缺点是没有区分来源权威性、信息完整性和重复转载。</p>
+<hr />
+<h2 id="7-first-exposure-如何找到证据第一次被检索出来的动作">7. First Exposure：如何找到证据第一次被检索出来的动作</h2>
+<p>设 \(A_i\)6 表示在动作步骤 \(A_i\)7 首次对 Agent 可用的 URL 集合。对于一个支持文档 \(A_i\)8：</p>
+<p>\[
+G=(V,E)
+\]2</p>
+<p>所有分给文档 \(A_i\)9 的信用，都转移到 \(c_{i,t}\)0。以后再次遇到同一 URL，不重复计分。</p>
+<h3 id="为什么优先奖励-discovery-而不是-read">为什么优先奖励 discovery 而不是 read</h3>
+<p>如果轨迹为：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Step 1: search(...) → URL A 首次出现
+Step 2: open(URL A) → 读取正文
+Step 4: search(...) → URL A 再次出现
+</code></pre></div>
+<p>STAMP 把 URL A 的信用归给 Step 1。</p>
+<p>作者的核心假设是：在 Deep Search 中，最困难的是构造能把关键网页“搜出来”的 query。因此，它偏向奖励 discovery action。</p>
+<p>这是一个明确的归纳偏置，并不意味着 Step 1 已经真正理解了网页。对 DeepResearch，更精细的版本可以区分：</p>
+<ul>
+<li>首次 URL 暴露；</li>
+<li>首次有效段落读取；</li>
+<li>首次 claim 验证；</li>
+<li>首次冲突消解。</li>
+</ul>
+<hr />
+<h2 id="8-步骤信用与上限">8. 步骤信用与上限</h2>
+<p>设步骤 \(c_{i,t}\)1 收到的实体信用总和为 \(c_{i,t}\)2，关系信用总和为 \(c_{i,t}\)3，则：</p>
+<p>\[
+G=(V,E)
+\]3</p>
+<p>论文设置：</p>
+<p>\[
+G=(V,E)
+\]4</p>
+<p>信用上限防止一个宽泛 query 一次返回大量相关 URL，从而让某一步的梯度过度主导训练。</p>
+<p>整条轨迹的信用预算受证据图大小约束，而不是轨迹长度约束：</p>
+<p>\[
+G=(V,E)
+\]5</p>
+<p>因此，盲目增加搜索步骤不会凭空积累更多信用。</p>
+<hr />
+<h2 id="9-grpo-中如何注入信用">9. GRPO 中如何注入信用</h2>
+<h3 id="9-1-普通-grpo">9.1 普通 GRPO</h3>
+<p>同一个问题采样 \(c_{i,t}\)4 条 rollout，奖励为 \(c_{i,t}\)5，组相对优势为：</p>
+<p>\[
+G=(V,E)
+\]6</p>
+<p>普通 GRPO 将同一个 \(c_{i,t}\)6 广播给轨迹 \(c_{i,t}\)7 中所有模型动作 token。</p>
+<h3 id="9-2-为什么不能直接把步骤信用加到轨迹奖励">9.2 为什么不能直接把步骤信用加到轨迹奖励</h3>
+<p>如果定义：</p>
+<p>\[
+G=(V,E)
+\]7</p>
+<p>那么经过组归一化后，\(c_{i,t}\)8 仍会变成一个轨迹级优势，再次广播给所有步骤，时间定位信息会消失。</p>
+<h3 id="9-3-保号优势调制">9.3 保号优势调制</h3>
+<p>STAMP 定义：</p>
+<p>\[
+G=(V,E)
+\]8</p>
+<p>于是：</p>
+<p>\[
+G=(V,E)
+\]9</p>
+<p>若 token \(c_{i,t}\)9 属于动作步骤 \(A^*_{i,m}\)0，则：</p>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]0</p>
+<h4 id="正优势轨迹">正优势轨迹</h4>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]1</p>
+<p>有效证据步骤获得更强正向强化。</p>
+<h4 id="负优势轨迹">负优势轨迹</h4>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]2</p>
+<p>仍然保持负号，但有效证据步骤的惩罚更弱。</p>
+<h4 id="保号性质">保号性质</h4>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]3</p>
+<p>因此，STAMP 不会因为局部步骤有用，就把整体失败轨迹中的该步骤强行改成正样本。</p>
+<hr />
+<h2 id="10-完整数值演示">10. 完整数值演示</h2>
+<h3 id="10-1-搜索轨迹">10.1 搜索轨迹</h3>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Step 1  search(&quot;Sergeant York actor married Bewitched actress&quot;)
+        → 首次出现 URL A
+
+Step 2  open(URL A)
+        → 读到 Gig Young 与 Elizabeth Montgomery 的信息
+
+Step 3  search(&quot;Elizabeth Montgomery Bewitched actress&quot;)
+        → 首次出现 URL B
+
+Step 4  open(URL B)
+        → 读到 Elizabeth Montgomery 出演 Bewitched
+
+Step 5  final answer
+        → 引用 URL A 与 URL B
+</code></pre></div>
+<h3 id="10-2-验证结果">10.2 验证结果</h3>
+<p>实体支持：</p>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]4</p>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]5</p>
+<p>关系支持：</p>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]6</p>
+<h3 id="10-3-文档信用">10.3 文档信用</h3>
+<p>URL A 获得：</p>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]7</p>
+<p>URL B 获得：</p>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]8</p>
+<h3 id="10-4-回溯到步骤">10.4 回溯到步骤</h3>
+<p>\[
+u_1: E_0 \xrightarrow{\text{appeared in}} \text{Sergeant York}
+\]9</p>
+<p>因此：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]0</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]1</p>
+<p>其余步骤信用为 0。</p>
+<h3 id="10-5-正优势轨迹">10.5 正优势轨迹</h3>
+<p>若普通 GRPO 得到：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]2</p>
+<p>则：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th style="text-align:right">Step</th>
+  <th style="text-align:right">原优势</th>
+  <th style="text-align:right">信用</th>
+  <th style="text-align:right">STAMP 后优势</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td style="text-align:right">1</td>
+  <td style="text-align:right">1.000</td>
+  <td style="text-align:right">0.100</td>
+  <td style="text-align:right"><strong>1.100</strong></td>
+</tr>
+<tr>
+  <td style="text-align:right">2</td>
+  <td style="text-align:right">1.000</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">1.000</td>
+</tr>
+<tr>
+  <td style="text-align:right">3</td>
+  <td style="text-align:right">1.000</td>
+  <td style="text-align:right">0.045</td>
+  <td style="text-align:right"><strong>1.045</strong></td>
+</tr>
+<tr>
+  <td style="text-align:right">4</td>
+  <td style="text-align:right">1.000</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">1.000</td>
+</tr>
+<tr>
+  <td style="text-align:right">5</td>
+  <td style="text-align:right">1.000</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">1.000</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="10-6-负优势轨迹">10.6 负优势轨迹</h3>
+<p>若最终答错，组相对优势为：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]3</p>
+<p>则：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th style="text-align:right">Step</th>
+  <th style="text-align:right">原优势</th>
+  <th style="text-align:right">信用</th>
+  <th style="text-align:right">STAMP 后优势</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td style="text-align:right">1</td>
+  <td style="text-align:right">-1.000</td>
+  <td style="text-align:right">0.100</td>
+  <td style="text-align:right"><strong>-0.900</strong></td>
+</tr>
+<tr>
+  <td style="text-align:right">2</td>
+  <td style="text-align:right">-1.000</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">-1.000</td>
+</tr>
+<tr>
+  <td style="text-align:right">3</td>
+  <td style="text-align:right">-1.000</td>
+  <td style="text-align:right">0.045</td>
+  <td style="text-align:right"><strong>-0.955</strong></td>
+</tr>
+<tr>
+  <td style="text-align:right">4</td>
+  <td style="text-align:right">-1.000</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">-1.000</td>
+</tr>
+<tr>
+  <td style="text-align:right">5</td>
+  <td style="text-align:right">-1.000</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">-1.000</td>
+</tr>
+</tbody>
+</table></div>
+<p>有效动作仍然受罚，因为整条轨迹失败；但它们不再和完全无效动作一样被重罚。</p>
+<hr />
+<h2 id="11-lt-think-gt-工具调用与-token-mask">11. <code>&lt;think&gt;</code>、工具调用与 token mask</h2>
+<p>STAMP 没有单独评价 <code>&lt;think&gt;</code> 内容是否正确，也没有显式的：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]4</p>
+<p>但论文定义的是 action-step 级优势。一个典型 assistant step 为：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">&lt;think&gt;
+需要同时利用电影和婚姻条件进一步搜索。
+&lt;/think&gt;
+&lt;tool_call&gt;
+{&quot;name&quot;:&quot;search&quot;,&quot;arguments&quot;:{&quot;query&quot;:&quot;...&quot;}}
+&lt;/tool_call&gt;
+</code></pre></div>
+<p>按照论文数学描述，同一个 action step 中的模型生成 token 共享同一个 \(A^*_{i,m}\)1。通常包括：</p>
+<ul>
+<li><code>&lt;think&gt;</code> 中的推理 token；</li>
+<li>工具名称 token；</li>
+<li>query 参数 token；</li>
+<li>工具调用格式 token。</li>
+</ul>
+<p>不参与策略梯度的通常包括：</p>
+<ul>
+<li>用户输入；</li>
+<li>搜索引擎返回；</li>
+<li>网页正文 observation；</li>
+<li>padding。</li>
+</ul>
+<p>论文没有公开代码级 token mask，因此无法确认其对 <code>&lt;think&gt;</code> 是否设置了额外特殊规则。参考实现按照“所有 policy-generated action token 共享步骤优势”处理。</p>
+<hr />
+<h2 id="12-e-grpo-c-grpo-与-stamp-的关系">12. E-GRPO、C-GRPO 与 STAMP 的关系</h2>
+<h3 id="12-1-e-grpo">12.1 E-GRPO</h3>
+<p>E-GRPO 使用实体命中信息给整条轨迹更细的奖励，区分：</p>
+<ul>
+<li>完全没找到目标实体；</li>
+<li>找到部分目标实体但最终失败；</li>
+<li>完整成功。</li>
+</ul>
+<p>其本质仍然是生成一个轨迹标量：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]5</p>
+<h3 id="12-2-c-grpo">12.2 C-GRPO</h3>
+<p>C-GRPO 使用答案正确性和引用 rubric 评分，对完整证据链、引用支持和约束满足情况进行轨迹级打分：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]6</p>
+<h3 id="12-3-stamp">12.3 STAMP</h3>
+<p>STAMP 不替代上述 reward，而是接在其后：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]7</p>
+<p>所以实验结构是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">SFT checkpoint → GRPO + STAMP
+SFT checkpoint → E-GRPO + STAMP
+SFT checkpoint → C-GRPO + STAMP
+</code></pre></div>
+<p>而不是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">SFT → 完整 GRPO → 再做一轮独立 STAMP RL
+</code></pre></div>
+<p>STAMP 从 RL 的第一轮更新开始就嵌入优势计算过程。</p>
+<hr />
+<h2 id="13-参考源码-核心信用计算">13. 参考源码：核心信用计算</h2>
+<p>完整代码见：<a href="../assets/downloads/stamp/stamp_reference_impl.py"><code>code/stamp_reference_impl.py</code></a>。</p>
+<h3 id="13-1-文档信用">13.1 文档信用</h3>
+<div class="code-frame"><div class="code-head"><span class="code-file">python</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-python">from collections import defaultdict
+
+
+def allocate_document_credit(units, delta=0.03):
+    document_credit = defaultdict(float)
+
+    for unit in units:
+        if not unit.verified or not unit.supporting_urls:
+            continue
+
+        share = delta / len(unit.supporting_urls)
+        for url in unit.supporting_urls:
+            document_credit[url] += share
+
+    return dict(document_credit)
+</code></pre></div>
+<h3 id="13-2-首次暴露归因">13.2 首次暴露归因</h3>
+<div class="code-frame"><div class="code-head"><span class="code-file">python</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-python">def first_exposure_map(steps):
+    first_seen = {}
+
+    for step in sorted(steps, key=lambda x: x.step_id):
+        for url in step.exposed_urls:
+            first_seen.setdefault(canonicalize_url(url), step.step_id)
+
+    return first_seen
+</code></pre></div>
+<h3 id="13-3-步骤信用">13.3 步骤信用</h3>
+<div class="code-frame"><div class="code-head"><span class="code-file">python</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-python">def attribute_credit_to_steps(document_credit, exposure_map, cap=0.10):
+    raw_step_credit = defaultdict(float)
+
+    for url, credit in document_credit.items():
+        url = canonicalize_url(url)
+        if url not in exposure_map:
+            continue
+        raw_step_credit[exposure_map[url]] += credit
+
+    return {
+        step_id: min(cap, credit)
+        for step_id, credit in raw_step_credit.items()
+    }
+</code></pre></div>
+<h3 id="13-4-保号优势调制">13.4 保号优势调制</h3>
+<div class="code-frame"><div class="code-head"><span class="code-file">python</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-python">def sign_preserving_modulation(A, c, cap=0.10):
+    if not 0 &lt;= c &lt;= cap &lt; 1:
+        raise ValueError(&quot;Require 0 &lt;= c &lt;= cap &lt; 1&quot;)
+
+    sign = 1.0 if A &gt; 0 else -1.0 if A &lt; 0 else 0.0
+    return A * (1.0 + sign * c)
+</code></pre></div>
+<hr />
+<h2 id="14-pytorch-grpo-集成骨架">14. PyTorch/GRPO 集成骨架</h2>
+<p>下面的输入形状为：</p>
+<ul>
+<li><code>trajectory_advantages</code>: <code>[B]</code>；</li>
+<li><code>token_step_ids</code>: <code>[B, L]</code>；</li>
+<li><code>step_credit_matrix</code>: <code>[B, S]</code>；</li>
+<li><code>action_mask</code>: <code>[B, L]</code>。</li>
+</ul>
+<div class="code-frame"><div class="code-head"><span class="code-file">python</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-python">import torch
+
+
+def stamp_token_advantages(
+    trajectory_advantages,
+    token_step_ids,
+    step_credit_matrix,
+    action_mask,
+):
+    safe_step_ids = token_step_ids.clamp(
+        min=0,
+        max=step_credit_matrix.shape[1] - 1,
+    )
+
+    token_credit = step_credit_matrix.gather(
+        dim=1,
+        index=safe_step_ids,
+    )
+
+    A = trajectory_advantages[:, None]
+    A_star = A * (1.0 + torch.sign(A) * token_credit)
+
+    # 工具返回、用户输入、padding 等位置置零
+    return A_star * action_mask.to(A_star.dtype)
+</code></pre></div>
+<p>随后在 PPO/GRPO clipped objective 中，用 <code>A_star</code> 替换普通广播优势：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]8</p>
+<p>其中：</p>
+<p>\[
+u_2: E_0 \xrightarrow{\text{married to}} E_1
+\]9</p>
+<p>STAMP 不改变 PPO/GRPO clipping，只替换 advantage tensor。</p>
+<hr />
+<h2 id="15-完整训练伪代码">15. 完整训练伪代码</h2>
+<div class="code-frame"><div class="code-head"><span class="code-file">python</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-python">for batch in rl_dataloader:
+    # 1. 每个问题采样多个搜索轨迹
+    trajectories = rollout_agent(
+        policy,
+        batch.questions,
+        num_rollouts=8,
+    )
+
+    base_rewards = []
+    all_step_credits = []
+
+    for traj, graph in zip(trajectories, batch.evidence_graphs):
+        # 2. 轨迹级奖励：GRPO / E-GRPO / C-GRPO
+        reward = compute_base_reward(traj, graph)
+        base_rewards.append(reward)
+
+        # 3. 只验证最终回答真正引用的文档
+        cited_docs = resolve_cited_documents(traj)
+        verifier_output = verify_with_llm(
+            question=traj.question,
+            evidence_graph=graph,
+            final_answer=traj.final_answer,
+            cited_documents=cited_docs,
+        )
+
+        # 4. 实体/关系单元 → 文档信用
+        document_credit = allocate_document_credit(
+            verifier_output.units,
+            delta=0.03,
+        )
+
+        # 5. 文档 → URL 首次暴露步骤
+        exposure_map = first_exposure_map(traj.action_steps)
+        step_credit = attribute_credit_to_steps(
+            document_credit,
+            exposure_map,
+            cap=0.10,
+        )
+        all_step_credits.append(step_credit)
+
+    # 6. 普通 GRPO 组内归一化
+    trajectory_advantages = group_normalize(base_rewards)
+
+    # 7. 将步骤信用广播到对应 action token
+    token_advantages = build_stamp_token_advantages(
+        trajectory_advantages,
+        all_step_credits,
+        trajectories,
+    )
+
+    # 8. 保持原有 PPO/GRPO clipped objective
+    loss = grpo_loss(
+        policy,
+        trajectories,
+        token_advantages,
+    )
+    loss.backward()
+    optimizer.step()
+</code></pre></div>
+<hr />
+<h2 id="16-论文实验设计">16. 论文实验设计</h2>
+<h3 id="16-1-基础模型">16.1 基础模型</h3>
+<ul>
+<li>Qwen3-30B-A3B-Thinking-2507；</li>
+<li>30B 总参数，约 3B token 激活参数；</li>
+<li>VeRL 训练框架；</li>
+<li>16 张 H800。</li>
+</ul>
+<h3 id="16-2-搜索环境">16.2 搜索环境</h3>
+<ul>
+<li><code>search</code>：Serper API；</li>
+<li><code>open</code>：Jina API；</li>
+<li>实时开放网络，而不是固定本地语料库。</li>
+</ul>
+<h3 id="16-3-sft">16.3 SFT</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>项目</th>
+  <th style="text-align:right">设置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>合成问题</td>
+  <td style="text-align:right">3,000：2,000 英文 + 1,000 中文</td>
+</tr>
+<tr>
+  <td>过滤后轨迹</td>
+  <td style="text-align:right">1,500</td>
+</tr>
+<tr>
+  <td>教师模型</td>
+  <td style="text-align:right">Seed Pro 2.0</td>
+</tr>
+<tr>
+  <td>Epoch</td>
+  <td style="text-align:right">1</td>
+</tr>
+<tr>
+  <td>Batch size</td>
+  <td style="text-align:right">32</td>
+</tr>
+<tr>
+  <td>学习率</td>
+  <td style="text-align:right">\(A^*_{i,m}\)2</td>
+</tr>
+<tr>
+  <td>最大上下文</td>
+  <td style="text-align:right">64K</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="16-4-rl">16.4 RL</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>项目</th>
+  <th style="text-align:right">设置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>问题</td>
+  <td style="text-align:right">2,600：2,100 英文 + 500 中文</td>
+</tr>
+<tr>
+  <td>每问题 rollout</td>
+  <td style="text-align:right">8</td>
+</tr>
+<tr>
+  <td>Epoch</td>
+  <td style="text-align:right">2</td>
+</tr>
+<tr>
+  <td>生成轨迹总量近似</td>
+  <td style="text-align:right">\(A^*_{i,m}\)3</td>
+</tr>
+<tr>
+  <td>Global batch size</td>
+  <td style="text-align:right">256</td>
+</tr>
+<tr>
+  <td>Temperature</td>
+  <td style="text-align:right">1.0</td>
+</tr>
+<tr>
+  <td>学习率</td>
+  <td style="text-align:right">\(A^*_{i,m}\)4</td>
+</tr>
+<tr>
+  <td>KL 系数</td>
+  <td style="text-align:right">0.01</td>
+</tr>
+<tr>
+  <td>Clip range</td>
+  <td style="text-align:right">0.2</td>
+</tr>
+<tr>
+  <td>\(A^*_{i,m}\)5</td>
+  <td style="text-align:right">0.03</td>
+</tr>
+<tr>
+  <td>\(A^*_{i,m}\)6</td>
+  <td style="text-align:right">0.10</td>
+</tr>
+<tr>
+  <td>每轨迹最多验证 URL</td>
+  <td style="text-align:right">15</td>
+</tr>
+<tr>
+  <td>Judge</td>
+  <td style="text-align:right">GPT-5.1</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="16-5-benchmark">16.5 Benchmark</h3>
+<ul>
+<li>BrowseComp；</li>
+<li>BrowseComp-ZH；</li>
+<li>xbench-DS。</li>
+</ul>
+<p>统一推理环境使用 128K 上下文，不限制 turn 和时间。</p>
+<hr />
+<h2 id="17-主结果">17. 主结果</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>方法</th>
+  <th style="text-align:right">BrowseComp</th>
+  <th style="text-align:right">BrowseComp-ZH</th>
+  <th style="text-align:right">xbench-DS</th>
+  <th style="text-align:right">Overall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Qwen-30B-SFT</td>
+  <td style="text-align:right">11.1</td>
+  <td style="text-align:right">20.4</td>
+  <td style="text-align:right">57.0</td>
+  <td style="text-align:right">15.5</td>
+</tr>
+<tr>
+  <td>GRPO</td>
+  <td style="text-align:right">18.9</td>
+  <td style="text-align:right">30.8</td>
+  <td style="text-align:right">70.0</td>
+  <td style="text-align:right">24.1</td>
+</tr>
+<tr>
+  <td><strong>GRPO + STAMP</strong></td>
+  <td style="text-align:right"><strong>20.9</strong></td>
+  <td style="text-align:right"><strong>36.3</strong></td>
+  <td style="text-align:right"><strong>73.0</strong></td>
+  <td style="text-align:right"><strong>26.7</strong></td>
+</tr>
+<tr>
+  <td>E-GRPO</td>
+  <td style="text-align:right">15.9</td>
+  <td style="text-align:right">27.7</td>
+  <td style="text-align:right">65.0</td>
+  <td style="text-align:right">20.9</td>
+</tr>
+<tr>
+  <td><strong>E-GRPO + STAMP</strong></td>
+  <td style="text-align:right"><strong>17.0</strong></td>
+  <td style="text-align:right"><strong>29.4</strong></td>
+  <td style="text-align:right">65.0</td>
+  <td style="text-align:right"><strong>22.1</strong></td>
+</tr>
+<tr>
+  <td>C-GRPO</td>
+  <td style="text-align:right">18.3</td>
+  <td style="text-align:right">31.1</td>
+  <td style="text-align:right">69.0</td>
+  <td style="text-align:right">23.6</td>
+</tr>
+<tr>
+  <td><strong>C-GRPO + STAMP</strong></td>
+  <td style="text-align:right"><strong>20.5</strong></td>
+  <td style="text-align:right"><strong>34.6</strong></td>
+  <td style="text-align:right"><strong>71.0</strong></td>
+  <td style="text-align:right"><strong>26.0</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>结论：</p>
+<ol>
+<li>STAMP 在三类基础 reward 上都能叠加；</li>
+<li>对 outcome-only GRPO 和 citation-rubric reward 的增益更明显；</li>
+<li>E-GRPO 已经包含较密集的实体监督，所以增益较小；</li>
+<li>STAMP 提供的是与轨迹 reward 互补的步骤定位信息。</li>
+</ol>
+<hr />
+<h2 id="18-消融实验">18. 消融实验</h2>
+<h3 id="18-1-验证方式">18.1 验证方式</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>证据验证</th>
+  <th style="text-align:right">BC</th>
+  <th style="text-align:right">BC-ZH</th>
+  <th style="text-align:right">xbench</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>字符串匹配</td>
+  <td style="text-align:right">15.6</td>
+  <td style="text-align:right">26.6</td>
+  <td style="text-align:right">65.0</td>
+</tr>
+<tr>
+  <td><strong>URL + LLM Judge</strong></td>
+  <td style="text-align:right"><strong>20.9</strong></td>
+  <td style="text-align:right"><strong>36.3</strong></td>
+  <td style="text-align:right"><strong>73.0</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>字符串匹配难以处理别名、同义改写和真实关系蕴含。</p>
+<h3 id="18-2-归因与调制">18.2 归因与调制</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>归因</th>
+  <th>上限</th>
+  <th>负优势处理</th>
+  <th style="text-align:right">BC</th>
+  <th style="text-align:right">BC-ZH</th>
+  <th style="text-align:right">xbench</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>All-step</td>
+  <td>有</td>
+  <td>有</td>
+  <td style="text-align:right">19.2</td>
+  <td style="text-align:right">31.1</td>
+  <td style="text-align:right">71.0</td>
+</tr>
+<tr>
+  <td>Earliest</td>
+  <td>无</td>
+  <td>有</td>
+  <td style="text-align:right">16.3</td>
+  <td style="text-align:right">28.7</td>
+  <td style="text-align:right">67.0</td>
+</tr>
+<tr>
+  <td>Earliest</td>
+  <td>有</td>
+  <td>仅正优势</td>
+  <td style="text-align:right">20.1</td>
+  <td style="text-align:right">34.0</td>
+  <td style="text-align:right">71.0</td>
+</tr>
+<tr>
+  <td><strong>Earliest</strong></td>
+  <td><strong>有</strong></td>
+  <td><strong>正负都处理</strong></td>
+  <td style="text-align:right"><strong>20.9</strong></td>
+  <td style="text-align:right"><strong>36.3</strong></td>
+  <td style="text-align:right"><strong>73.0</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>关键发现：</p>
+<ul>
+<li>同一 URL 多次出现都奖励，会稀释信用；</li>
+<li>没有上限会让少数步骤主导梯度；</li>
+<li>错误轨迹中的局部正确动作值得减轻惩罚；</li>
+<li>训练中只有约 10%–12% 的步骤获得非零信用。</li>
+</ul>
+<hr />
+<h2 id="19-论文优势">19. 论文优势</h2>
+<h3 id="19-1-不需要通用-process-reward-model">19.1 不需要通用 Process Reward Model</h3>
+<p>开放网页动作空间巨大且持续变化，直接让 PRM 判断任意中间动作非常困难。STAMP 将问题转成更可验证的：</p>
+<blockquote>
+<p>文档是否支持标准实体或关系？</p>
+</blockquote>
+<h3 id="19-2-不改变轨迹排序">19.2 不改变轨迹排序</h3>
+<p>终局 reward、组内均值和方差不变，STAMP 只缩放步骤级梯度，不会让失败轨迹反转成成功监督。</p>
+<h3 id="19-3-可以利用失败轨迹中的局部有效动作">19.3 可以利用失败轨迹中的局部有效动作</h3>
+<p>这是长轨迹 Agent RL 中非常重要的能力。</p>
+<h3 id="19-4-与基础-reward-正交">19.4 与基础 reward 正交</h3>
+<p>可附加到 outcome、entity-aware、citation-aware reward 上。</p>
+<hr />
+<h2 id="20-局限与值得继续研究的问题">20. 局限与值得继续研究的问题</h2>
+<h3 id="20-1-url-首次出现不等于信息首次被理解">20.1 URL 首次出现不等于信息首次被理解</h3>
+<p>搜索结果可能只显示标题和 URL，真正证据直到 <code>open</code> 后才出现，但信用仍可能归给搜索动作。</p>
+<h3 id="20-2-只处理最终引用文档">20.2 只处理最终引用文档</h3>
+<p>Agent 中途找到并使用了关键网页，但最终忘记引用，该动作不会获得 STAMP 信用。</p>
+<h3 id="20-3-文档级粒度仍然较粗">20.3 文档级粒度仍然较粗</h3>
+<p>没有细化到：</p>
+<ul>
+<li>支持 claim 的具体段落；</li>
+<li>搜索 snippet 和网页正文的不同贡献；</li>
+<li>证据的权威性和独立性；</li>
+<li>复制转载与原始来源。</li>
+</ul>
+<h3 id="20-4-step-内部仍然统一加权">20.4 Step 内部仍然统一加权</h3>
+<p>关键 query 和冗长 <code>&lt;think&gt;</code> 可能共享同一优势。更细的方案可对：</p>
+<ul>
+<li>reasoning token；</li>
+<li>tool-name token；</li>
+<li>query token；</li>
+<li>URL token；</li>
+<li>格式 token；</li>
+</ul>
+<p>使用不同系数。</p>
+<h3 id="20-5-验证成本">20.5 验证成本</h3>
+<p>使用 GPT-5.1 对最多 15 个引用 URL 做实体和关系验证，会带来显著 API 成本和吞吐瓶颈。</p>
+<h3 id="20-6-实验范围有限">20.6 实验范围有限</h3>
+<ul>
+<li>只验证一个 30B MoE backbone；</li>
+<li>没有报告多随机种子方差；</li>
+<li>实时网页环境具有时间漂移；</li>
+<li>没有系统评估工具调用次数和搜索成本。</li>
+</ul>
+<hr />
+<h2 id="21-面向-deepresearch-的自然扩展">21. 面向 DeepResearch 的自然扩展</h2>
+<p>STAMP 当前路径是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">目标实体/关系
+      ↓
+支持网页
+      ↓
+URL 首次暴露动作
+</code></pre></div>
+<p>DeepResearch 更适合扩展为：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">最终报告中的原子 Claim
+      ↓
+支持 Claim 的证据段落
+      ↓
+网页与来源质量
+      ↓
+首次发现动作 / 首次读取动作 / 首次验证动作
+      ↓
+分层步骤信用
+</code></pre></div>
+<p>可以设计：</p>
+<p>\[
+u_3: E_1 \xrightarrow{\text{appeared in}} \text{Bewitched}
+\]0</p>
+<p>其中：</p>
+<ul>
+<li>\(A^*_{i,m}\)7：首次找到关键来源；</li>
+<li>\(A^*_{i,m}\)8：首次提取支持 claim 的段落；</li>
+<li>\(A^*_{i,m}\)9：首次用独立来源完成交叉验证；</li>
+<li>\(V\)0：发现并消解多源冲突。</li>
+</ul>
+<p>这比单纯将 STAMP 套到长报告上更有研究价值。</p>
+<hr />
+<h2 id="22-复现检查清单">22. 复现检查清单</h2>
+<ul>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>每个训练问题有标准实体和原子关系图；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>轨迹完整保存每步 action、observation、URL；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>URL 规范化规则固定；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>只验证最终可解析引用；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>verifier 输出实体/关系对应支持 URL；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>每个 evidence unit 总信用固定为 \(V\)1；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>同一文档信用只归给首次暴露步骤；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>单步信用截断到 \(V\)2；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>先计算原始 GRPO 组优势，再做步骤调制；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>仅 policy-generated action token 参与 loss；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>工具 observation 和 padding 使用 mask；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>对 GRPO、GRPO+STAMP 使用相同 SFT checkpoint；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>搜索工具、训练问题、rollout 数和上下文保持一致；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>单独统计关系验证率、实体率、非零信用步骤比例；</li>
+<li class="task-list-item"><input class="task-list-item-checkbox" type="checkbox" disabled/>至少比较 earliest、all-step、read-time 等归因策略。</li>
+</ul>
+<hr />
+<h2 id="23-最后总结">23. 最后总结</h2>
+<p>STAMP 的核心贡献可以写成四句话：</p>
+<ol>
+<li><strong>奖励与信用分开</strong>：最终答案 reward 决定轨迹整体方向，证据来源决定局部步骤强度。</li>
+<li><strong>LLM 验证证据，不直接评价动作</strong>：减少对通用过程奖励模型的依赖。</li>
+<li><strong>首次暴露归因</strong>：把有效引用网页追溯到首次带来该网页的动作。</li>
+<li><strong>保号优势调制</strong>：成功轨迹关键动作多奖励，失败轨迹局部正确动作少惩罚，但不翻转正负方向。</li>
+</ol>
+<p>它仍然是 action-step 粒度的信用分配，而不是 query-token、claim 或证据段落级的因果归因。正因如此，STAMP 更像一个清晰、可操作的起点，而不是 DeepSearch/DeepResearch 信用分配问题的终点。</p>
+<hr />
+<h2 id="参考资料">参考资料</h2>
+<ol>
+<li>Xu, K. et al. <strong>STAMP: Provenance-Guided Credit Assignment for Deep Search Agents</strong>. arXiv:2607.11172v1, 2026.</li>
+<li>OpenReview: ACL ARR 2026 May Submission 16423, <em>STAMP: Provenance-Guided Credit Assignment for Deep Search Agents</em>.</li>
+<li>本地论文：<a href="../assets/downloads/stamp/2607.11172v1.pdf"><code>paper/2607.11172v1.pdf</code></a>。</li>
+<li>参考实现：<a href="../assets/downloads/stamp/stamp_reference_impl.py"><code>code/stamp_reference_impl.py</code></a>；测试：<a href="../assets/downloads/stamp/test_stamp_reference_impl.py"><code>code/test_stamp_reference_impl.py</code></a>。</li>
+</ol>
+
+      </article>
+    </div>
+  </main>
+
+  <footer class="footer"><div class="footer-inner"><span>© 2026 常中豪</span><span>研究与学习记录。</span><a href="verl-async-rl.html">上一篇：verl 里的异步强化学习 »</a></div></footer>
+  <script src="../assets/app.js?v=3"></script>
+</body>
+</html>

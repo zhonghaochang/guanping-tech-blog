@@ -152,8 +152,13 @@ img { max-width: 100%; height: auto; }
 .article h2 { margin: 54px 0 21px; padding-bottom: 8px; border-bottom: 1px solid var(--rule); font-size: 28px; line-height: 1.45; scroll-margin-top: 20px; }
 .article h2:first-child { margin-top: 0; }
 .article h3 { margin: 36px 0 14px; font-size: 21px; line-height: 1.55; }
+.article h4 { margin: 27px 0 12px; font-size: 17px; line-height: 1.6; }
 .article ul, .article ol { padding-left: 24px; }
 .article li { margin: 9px 0; }
+.article blockquote { margin: 27px 0; padding: 17px 19px; color: var(--ink-soft); border-left: 4px solid var(--accent); background: var(--surface-strong); }
+.article blockquote p:last-child { margin-bottom: 0; }
+.article .task-list-item { list-style: none; }
+.article .task-list-item input { margin: 0 8px 0 -22px; accent-color: var(--accent); }
 .article code, td code { padding: 2px 5px; border-radius: 3px; background: var(--surface-strong); font-family: var(--mono); font-size: .88em; }
 .article p code, .article li code, .article-side-meta code { overflow-wrap: anywhere; word-break: break-word; }
 .article .references { color: var(--muted); font-size: 14px; }
@@ -178,6 +183,8 @@ pre code { padding: 0 !important; color: inherit !important; background: transpa
 .copy-btn { flex: 0 0 auto; padding: 5px 8px; cursor: pointer; color: var(--code-muted); border: 1px solid #435248; border-radius: 3px; background: transparent; font: 11px var(--sans); }
 .copy-btn:hover { color: #fff; }
 .note, .warning, .takeaway, .claim { margin: 27px 0; padding: 17px 19px; border-left: 4px solid var(--accent); border-radius: 0 6px 6px 0; background: var(--surface-strong); font-size: 15px; }
+.math-block { margin: 26px 0; padding: 14px 18px; overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-strong); text-align: center; }
+.stamp-article .note a { white-space: nowrap; }
 .equation { margin: 28px 0 10px; padding: 18px 20px; overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-strong); font: 17px/1.8 Georgia, "Times New Roman", serif; text-align: center; white-space: nowrap; }
 .equation + .equation-note { margin: 0 0 28px; color: var(--muted); font: 13px/1.75 var(--sans); text-align: center; }
 .source-path { margin: -12px 0 22px !important; color: var(--muted); font: 12px/1.7 var(--mono) !important; }

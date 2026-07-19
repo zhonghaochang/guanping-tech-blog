@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tree-GRPO：用树状 Rollout 重构 Agent 强化学习的信用分配｜常中豪</title>
+  <meta name="description" content="拆解 Tree-GRPO 的树状 rollout、树内与树间优势、完整搜索案例、实验结果和直接 RL 训练配置。" />
+  <meta name="theme-color" content="#f4f3d9" />
+  <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/tree-grpo-credit-assignment.html" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="常中豪的网络日志" />
+  <meta property="og:title" content="Tree-GRPO：用树状 Rollout 重构 Agent 强化学习的信用分配" />
+  <meta property="og:description" content="从链式 GRPO 的信用分配问题，到树状采样、优势估计和完整训练过程。" />
+  <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/tree-grpo-credit-assignment.html" />
+  <meta property="article:published_time" content="2026-07-19" />
+  <meta name="twitter:card" content="summary" />
+  <link rel="icon" href="../assets/favicon.svg" />
+  <link rel="stylesheet" href="../assets/styles.css?v=14" />
+  <script>window.MathJax = {tex: {inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]'], ['$$', '$$']]}};</script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body>
+  <div class="progress"></div>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="../index.html">常中豪的网络日志</a>
+      <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
+      <div class="nav-links" id="site-navigation"><a href="../index.html">首页</a><a href="../archives.html">归档</a><a href="../about.html">关于</a><button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button></div>
+    </nav>
+  </header>
+
+  <main class="article-shell">
+    <header class="article-masthead">
+      <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
+      <div class="article-headline">
+        <h1>Tree-GRPO：用树状 Rollout 重构 Agent 强化学习的信用分配</h1>
+        <p class="article-deck">共享搜索前缀，在相同历史状态下比较不同后续。本文从树状 rollout 和优势估计讲到完整案例、实验结果，以及这套方法实际怎样训练。</p>
+      </div>
+      <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 19 日</div>
+    </header>
+
+    <div class="article-layout">
+      <article class="article tree-grpo-article">
+        <div class="note"><strong>相关材料：</strong><a href="https://arxiv.org/abs/2509.21240">论文</a> · <a href="https://github.com/AMAP-ML/Tree-GRPO">官方代码</a>。训练配置同时参考论文 v3 和公开脚本；两者不一致的地方会在正文里单独标出。</div>
+<p>最近在看 Tree-GRPO。起因很具体：在普通 GRPO 里，同一道题会独立采样多条完整轨迹，每条轨迹最终只有一个结果奖励。对于数学题，这种做法已经存在信用分配偏粗的问题；放到多轮搜索 Agent 里，问题会更明显——一次错误可能只发生在第三次搜索，但整条轨迹里的第一步、第二步和第三步却共享同一个优势值。</p>
+<p>Tree-GRPO 没有再训练一个过程奖励模型，也没有要求人工标注“哪一步正确”。它改变的是 <strong>Rollout 的组织方式</strong>：先生成少量完整主干，再从已有轨迹的中间 Agent 步骤继续分叉。这样既能复用搜索前缀，又能在相同历史状态下比较不同后续决策。本文只围绕五个问题展开：过去 GRPO 的信用分配为什么不够细；Tree-GRPO 到底改了什么；一棵树如何被采样和训练；实验结果说明了什么；最后这套训练到底有没有 SFT、用了多少样本和资源。</p>
+<div class="article-index">
+<p class="article-index-title">目录</p>
+<ol>
+<li><a href="#chapter-1">过去 GRPO 的信用分配问题</a></li>
+<li><a href="#chapter-2">Tree-GRPO 的核心思想与完整机制</a></li>
+<li><a href="#chapter-3">用一个多跳搜索案例跑完整个过程</a></li>
+<li><a href="#chapter-4">实验结果与消融：它究竟改善了什么</a></li>
+<li><a href="#chapter-5">训练过程：阶段、样本、参数与资源</a></li>
+</ol>
+</div>
+
+<h2 id="chapter-1">1. 过去 GRPO 的信用分配问题</h2>
+
+<h3 id="1-1-从一组完整回答计算相对优势">1.1 从一组完整回答计算相对优势</h3>
+<p>对问题 \(x\)，普通 GRPO 从旧策略 \(\pi_{\text{old}}\) 独立采样 \(G\) 条完整轨迹：</p>
+<div class="math-block">$$
+H^1,H^2,\ldots,H^G \sim \pi_{\text{old}}(\cdot\mid x).
+$$</div>
+<p>每条轨迹结束以后得到一个结果奖励 \(R(H^i)\)，再在同一问题的组内标准化：</p>
+<div class="math-block">$$
+\hat A(H^i)=
+\frac{R(H^i)-\mu_R}{\sigma_R+\epsilon}.
+$$</div>
+<p>这一步本身没有问题。GRPO 的优势是不用单独训练价值模型，而是让同一道题下的多个候选互相充当基线。问题出现在：<strong>这个优势值的统计对象是一条完整轨迹，而不是轨迹里的某一个 Agent 步骤。</strong></p>
+<p>在 ReAct 搜索 Agent 中，一条轨迹可能是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Step 1  Thought → Search → Observation
+Step 2  Thought → Search → Observation
+Step 3  Thought → Search → Observation
+Step 4  Final Answer
+</code></pre></div>
+<p>如果最终答案错误，整条轨迹得到负优势。训练时，Step 1、Step 2 和 Step 3 中由策略模型生成的 token 都会受到这条负优势影响。最终奖励只说明“整条路线没有成功”，却没有直接说明错误从哪里开始。</p>
+<h3 id="1-2-长轨迹把一个局部错误放大成整条轨迹的惩罚">1.2 长轨迹把一个局部错误放大成整条轨迹的惩罚</h3>
+<p>考虑两条轨迹：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">轨迹 A：识别人名 → 查出生地 → 查首都河流 → 正确
+轨迹 B：识别人名 → 查出生地 → 误查国家最长河流 → 错误
+</code></pre></div>
+<p>它们前两步完全相同，真正的差异只发生在最后一次搜索。但链式 GRPO 把它们当作两条彼此独立的完整样本：A 的所有动作获得正信号，B 的所有动作获得负信号。于是，“识别人名”和“查出生地”同时出现在正、负轨迹里，却没有一个结构告诉优化器：这两个步骤其实不是造成差异的关键。</p>
+<p>这类问题在多轮 Agent 中尤其严重，因为轨迹越长，最终奖励与早期动作之间的距离越远。论文把它概括为 <strong>稀疏监督（sparse supervision）</strong>：轨迹长度和工具调用不断增加，但监督仍然只有末尾的一个标量结果。</p>
+<h3 id="1-3-独立链式-rollout-还会重复支付前缀成本">1.3 独立链式 Rollout 还会重复支付前缀成本</h3>
+<p>普通 GRPO 的另一个问题是成本。假设同一道题的四条轨迹都先搜索同一个人物，只在后面走向不同实体，那么四条轨迹仍会重复生成早期思考、重复调用搜索工具、重复读取相似观察结果。</p>
+<div class="compare-grid">
+<div class="compare-card">
+<strong>链式采样</strong>
+<pre>问题
+├─ A1 → A2 → A3 → 答案
+├─ B1 → B2 → B3 → 答案
+├─ C1 → C2 → C3 → 答案
+└─ D1 → D2 → D3 → 答案</pre>
+<p>每条轨迹都从头执行，前缀无法复用。</p>
+</div>
+<div class="compare-card">
+<strong>树状采样</strong>
+<pre>问题
+└─ A1 → A2
+        ├─ A3 → 答案 1
+        ├─ B3 → 答案 2
+        └─ C3 → 答案 3</pre>
+<p>共享 A1、A2，只重新生成分叉后的部分。</p>
+</div>
+</div>
+
+<p>因此，过去 GRPO 在 Agent 场景里同时存在两个相互关联的问题：</p>
+<blockquote>
+<p>一方面，完整独立轨迹造成大量重复 Rollout；另一方面，每条完整轨迹只有一个统一优势，难以定位中间步骤的相对贡献。</p>
+</blockquote>
+<p>Tree-GRPO 的出发点不是给奖励函数增加更多规则，而是先改变轨迹之间的结构关系。</p>
+<h2 id="chapter-2">2. Tree-GRPO 的核心思想与完整机制</h2>
+
+<h3 id="2-1-树节点不是-token-而是完整-agent-步骤">2.1 树节点不是 token，而是完整 Agent 步骤</h3>
+<p>Tree-GRPO 把一个完整的 Thought–Action–Observation 三元组作为树节点：</p>
+<div class="math-block">$$
+p_t=(\tau_t,\alpha_t,o_t),
+$$</div>
+<p>其中 \(\tau_t\) 是思考，\(\alpha_t\) 是搜索或工具动作，\(o_t\) 是环境返回的观察。这样做的原因很直接：如果在半个搜索标签、半句话或某个任意 token 处分叉，新生成内容可能与已经发生的工具调用不一致。Agent 步骤天然给出了语义完整的状态边界。</p>
+<p>一条轨迹写成：</p>
+<div class="math-block">$$
+H=\{(\tau_0,\alpha_0,o_0),\ldots,(\tau_{T-1},\alpha_{T-1},o_{T-1})\}.
+$$</div>
+<p>Tree-GRPO 不是传统 MCTS。它没有 UCB、访问次数或价值引导的节点选择；论文采用的是“先初始化、再随机扩展”的在线采样方式。</p>
+<h3 id="2-2-初始化-采样和扩展">2.2 初始化、采样和扩展</h3>
+<p>对每一个训练问题，树状 Rollout 分三步完成。</p>
+<p><strong>第一步：初始化 \(M\) 棵树。</strong> 策略模型从问题起点独立生成 \(M\) 条完整轨迹，每条轨迹构成一棵树的主干。\(M\) 越大，初始路线越多，全局探索越广，但从头生成的成本也越高。</p>
+<p><strong>第二步：每棵树随机选择 \(N\) 个非答案节点。</strong> 这些节点可能位于早期、中期或临近答案的位置。早期分叉比较的是较长的后续策略，后期分叉则更接近某一个局部动作的比较。</p>
+<p><strong>第三步：从选中节点继续 Rollout。</strong> 系统保留从问题到该节点的全部上下文，然后只重新生成该节点之后的剩余轨迹。新后续被接回原树，成为一条新的叶子路径。</p>
+<p>将“采样 \(N\) 个节点并扩展”重复 \(L\) 轮后，每个问题最终得到：</p>
+<div class="math-block">$$
+G=M(LN+1)
+$$</div>
+<p>条完整叶子轨迹。</p>
+<div class="note">
+<strong>关于 L 最准确的理解</strong><br>
+L 是扩展轮数。第 1 轮从初始树中选 N 个节点；第 2 轮从已经扩大的整棵树中再选 N 个节点，因此可能选到上一轮新生成的节点，也可能再次选到原主干节点。每轮每棵树只新增 N 条轨迹，所以叶子数线性增长为 1+LN，而不是每个新分支都再生 N 个孩子的指数增长。
+</div>
+
+<p>例如 \(M=1,N=2,L=3\)：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">初始化：1 条主干
+第 1 轮：新增 2 条叶子
+第 2 轮：新增 2 条叶子
+第 3 轮：新增 2 条叶子
+最终：1 + 3×2 = 7 条叶子
+</code></pre></div>
+<p>三个超参数的分工可以压缩成一句话：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>参数</th>
+  <th>控制什么</th>
+  <th>增大后的主要效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>\(M\)</td>
+  <td>独立主干数量</td>
+  <td>增强全局探索，但增加完整 Rollout 成本</td>
+</tr>
+<tr>
+  <td>\(N\)</td>
+  <td>每轮每棵树扩展的节点数</td>
+  <td>增加横向分支和局部比较，适合并行</td>
+</tr>
+<tr>
+  <td>\(L\)</td>
+  <td>扩展轮数</td>
+  <td>允许“分支上的分支”，但增加串行等待</td>
+</tr>
+</tbody>
+</table></div>
+<p>论文的大多数标准实验使用 \(M=2,N=2,L=1\)。这意味着先生成两条独立主干，每棵树在一轮中选两个节点扩展，最终得到六条叶子轨迹。</p>
+<h3 id="2-3-树内优势和树间优势">2.3 树内优势和树间优势</h3>
+<p>树状 Rollout 完成后，所有叶子仍然只在最终答案处获得结果奖励。Tree-GRPO 的关键变化在于：同一个问题下的轨迹被组织成两个不同的统计层级。</p>
+<p><strong>树内优势（intra-tree advantage）</strong> 只使用同一棵树内的叶子计算均值和标准差：</p>
+<div class="math-block">$$
+\hat A_{\text{intra}}(H^i)=
+\frac{R(H^i)-\mu_{\mathcal T_i}}
+{\sigma_{\mathcal T_i}+\epsilon}.
+$$</div>
+<p>同一棵树里的轨迹共享较多前缀，因此树内比较更接近：在相似历史状态下，哪一种后续更好。</p>
+<p><strong>树间优势（inter-tree advantage）</strong> 把该问题下所有树的叶子放在一起：</p>
+<div class="math-block">$$
+\hat A_{\text{inter}}(H^i)=
+\frac{R(H^i)-\mu_{\mathcal G}}
+{\sigma_{\mathcal G}+\epsilon}.
+$$</div>
+<p>它提供一个更稳定的全局基线，判断一条完整轨迹相对于当前问题的全部候选总体表现如何。</p>
+<p>最终优势是两者之和：</p>
+<div class="math-block">$$
+\hat A_{\text{tree}}(H^i)
+=
+\hat A_{\text{intra}}(H^i)
++
+\hat A_{\text{inter}}(H^i).
+$$</div>
+<p>为什么不能只用树内优势？如果一棵树只有三条叶子，而且奖励全是 0，树内标准差为 0；即使奖励是 \(\{1,0,0\}\)，样本也很少，基线方差较大。树间优势相当于一个兜底的全局参照。</p>
+<h3 id="2-4-为什么它能产生隐式步骤偏好">2.4 为什么它能产生隐式步骤偏好</h3>
+<p>设两条叶子共享前缀 \(P\)，之后分别走向成功后续 \(S^+\) 和失败后续 \(S^-\)：</p>
+<div class="math-block">$$
+H^+=P\oplus S^+,\qquad H^-=P\oplus S^-.
+$$</div>
+<p>当它们获得相反方向的优势时，策略梯度中共同前缀的项会在局部比较里相互抵消，主要差异落在分叉后的后续：</p>
+<div class="math-block">$$
+\nabla\log \pi(S^+\mid P)
+-
+\nabla\log \pi(S^-\mid P).
+$$</div>
+<p>论文进一步证明，在二元胜负假设下，树内 GRPO 与步骤级 DPO 具有相同的偏好梯度结构，差别主要在权重项。因此 Tree-GRPO 可以被理解为：<strong>在线生成“共享状态—优选后续—劣选后续”的步骤偏好数据，但不需要先离线构造 DPO 数据。</strong></p>
+<p>需要保留一个细节：论文实现中的树内优势是以整棵树的所有叶子为统计组，并不是为每一个分叉节点单独计算局部 \(Q\) 值。因此它属于“由树结构诱导的隐式步骤信用”，还不是显式节点价值回传。</p>
+<h2 id="chapter-3">3. 用一个多跳搜索案例跑完整个过程</h2>
+
+<p>下面使用一个教学案例，完整演示初始化、分支、结果奖励和优势计算。这个例子用于解释算法，不是论文原始样本。</p>
+<blockquote>
+<p>问题：电影《盗梦空间》的导演出生在哪座城市？该城市所在国家的首都流经哪条著名河流？</p>
+<p>标准答案：泰晤士河。</p>
+</blockquote>
+<p>设置：</p>
+<div class="math-block">$$
+M=2,\qquad N=2,\qquad L=1.
+$$</div>
+<p>所以最终叶子数为：</p>
+<div class="math-block">$$
+G=2(1\times2+1)=6.
+$$</div>
+<p>奖励采用最简单的二元形式：答案正确记为 1，错误记为 0。</p>
+<h3 id="3-1-两条初始主干">3.1 两条初始主干</h3>
+<p>第一条主干按正确关系链执行：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">A1  搜索 Inception director
+    → Christopher Nolan
+
+A2  搜索 Christopher Nolan birthplace
+    → London
+
+A3  搜索 river flowing through London
+    → River Thames
+
+H11 最终答案：泰晤士河，R=1
+</code></pre></div>
+<p>第二条主干前两步正确，但最后把“流经首都的河流”偷换成“该国最长河流”：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">B1  搜索 Inception director birthplace
+    → Christopher Nolan was born in London
+
+B2  搜索 capital of the United Kingdom
+    → London
+
+B3  搜索 longest river in the United Kingdom
+    → River Severn
+
+H21 最终答案：塞文河，R=0
+</code></pre></div>
+<h3 id="3-2-从中间节点生成四条新分支">3.2 从中间节点生成四条新分支</h3>
+<p>Tree 1 选择 \(A_1\) 和 \(A_2\) 两个节点扩展。</p>
+<ul>
+<li>从 \(A_1\) 后重新生成时，模型错误地查询 Nolan 的国籍，并把美国国籍当成出生地所在国家，最终回答波托马克河，得到 \(H_{12},R=0\)。</li>
+<li>从 \(A_2\) 后重新生成时，模型仍然误查英国最长河流，得到 \(H_{13},R=0\)。</li>
+</ul>
+<p>Tree 2 选择 \(B_1\) 和 \(B_2\) 两个节点扩展。</p>
+<ul>
+<li>从 \(B_1\) 后重新生成时，模型重新确认 London 是英国首都，再查询流经 London 的河流，得到 \(H_{22},R=1\)。</li>
+<li>从 \(B_2\) 后重新生成时，只修正最后一次查询，得到 \(H_{23},R=1\)。</li>
+</ul>
+<p>最终两棵树是：</p>
+<div class="tree-pair">
+<div class="tree-box">
+<strong>Tree 1</strong>
+<pre>问题
+└─ A1：导演是 Nolan
+   ├─ A2：出生于 London
+   │  ├─ A3：查流经 London 的河
+   │  │  └─ H11 泰晤士河，R=1
+   │  └─ A3b：误查英国最长河
+   │     └─ H13 塞文河，R=0
+   └─ A2a：误用国籍代替出生国家
+      └─ H12 波托马克河，R=0</pre>
+</div>
+<div class="tree-box">
+<strong>Tree 2</strong>
+<pre>问题
+└─ B1：Nolan 出生于 London
+   ├─ B2：确认 London 是英国首都
+   │  ├─ B3：误查英国最长河
+   │  │  └─ H21 塞文河，R=0
+   │  └─ B3b：查流经 London 的河
+   │     └─ H23 泰晤士河，R=1
+   └─ B2a：重新确认国家和首都
+      └─ H22 泰晤士河，R=1</pre>
+</div>
+</div>
+
+<p>六条叶子的结果为：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>轨迹</th>
+  <th style="text-align:right">所属树</th>
+  <th>关键决策</th>
+  <th style="text-align:right">奖励</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>\(H_{11}\)</td>
+  <td style="text-align:right">Tree 1</td>
+  <td>按出生地—首都—河流关系搜索</td>
+  <td style="text-align:right">1</td>
+</tr>
+<tr>
+  <td>\(H_{12}\)</td>
+  <td style="text-align:right">Tree 1</td>
+  <td>把国籍当成出生地所在国家</td>
+  <td style="text-align:right">0</td>
+</tr>
+<tr>
+  <td>\(H_{13}\)</td>
+  <td style="text-align:right">Tree 1</td>
+  <td>把首都河流偷换成国家最长河</td>
+  <td style="text-align:right">0</td>
+</tr>
+<tr>
+  <td>\(H_{21}\)</td>
+  <td style="text-align:right">Tree 2</td>
+  <td>查询英国最长河流</td>
+  <td style="text-align:right">0</td>
+</tr>
+<tr>
+  <td>\(H_{22}\)</td>
+  <td style="text-align:right">Tree 2</td>
+  <td>重新确认关系并查询首都河流</td>
+  <td style="text-align:right">1</td>
+</tr>
+<tr>
+  <td>\(H_{23}\)</td>
+  <td style="text-align:right">Tree 2</td>
+  <td>在最后一步修正搜索目标</td>
+  <td style="text-align:right">1</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="3-3-手算树内-树间和最终优势">3.3 手算树内、树间和最终优势</h3>
+<p>Tree 1 的奖励是 \(\{1,0,0\}\)。使用总体标准差并忽略极小稳定项：</p>
+<div class="math-block">$$
+\mu_1=\frac13,\qquad \sigma_1\approx0.4714.
+$$</div>
+<p>所以：</p>
+<div class="math-block">$$
+\hat A_{\text{intra}}(H_{11})\approx1.414,
+$$</div>
+<div class="math-block">$$
+\hat A_{\text{intra}}(H_{12})
+=
+\hat A_{\text{intra}}(H_{13})
+\approx-0.707.
+$$</div>
+<p>Tree 2 的奖励是 \(\{0,1,1\}\)：</p>
+<div class="math-block">$$
+\hat A_{\text{intra}}(H_{21})\approx-1.414,
+$$</div>
+<div class="math-block">$$
+\hat A_{\text{intra}}(H_{22})
+=
+\hat A_{\text{intra}}(H_{23})
+\approx0.707.
+$$</div>
+<p>全部六条轨迹的奖励是 \(\{1,0,0,0,1,1\}\)，全局均值为 0.5、标准差为 0.5，因此正确轨迹的树间优势为 +1，错误轨迹为 -1。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>轨迹</th>
+  <th style="text-align:right">树内优势</th>
+  <th style="text-align:right">树间优势</th>
+  <th style="text-align:right">最终优势</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>\(H_{11}\)</td>
+  <td style="text-align:right">+1.414</td>
+  <td style="text-align:right">+1</td>
+  <td style="text-align:right"><strong>+2.414</strong></td>
+</tr>
+<tr>
+  <td>\(H_{12}\)</td>
+  <td style="text-align:right">-0.707</td>
+  <td style="text-align:right">-1</td>
+  <td style="text-align:right"><strong>-1.707</strong></td>
+</tr>
+<tr>
+  <td>\(H_{13}\)</td>
+  <td style="text-align:right">-0.707</td>
+  <td style="text-align:right">-1</td>
+  <td style="text-align:right"><strong>-1.707</strong></td>
+</tr>
+<tr>
+  <td>\(H_{21}\)</td>
+  <td style="text-align:right">-1.414</td>
+  <td style="text-align:right">-1</td>
+  <td style="text-align:right"><strong>-2.414</strong></td>
+</tr>
+<tr>
+  <td>\(H_{22}\)</td>
+  <td style="text-align:right">+0.707</td>
+  <td style="text-align:right">+1</td>
+  <td style="text-align:right"><strong>+1.707</strong></td>
+</tr>
+<tr>
+  <td>\(H_{23}\)</td>
+  <td style="text-align:right">+0.707</td>
+  <td style="text-align:right">+1</td>
+  <td style="text-align:right"><strong>+1.707</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>最重要的不是这几个具体数值，而是它们形成的比较关系。</p>
+<p>在 Tree 1 中，三条轨迹都共享 \(A_1\)。树内优势在这个共享节点上的总和为：</p>
+<div class="math-block">$$
+1.414-0.707-0.707=0.
+$$</div>
+<p>这说明局部比较不会把成功和失败的差异简单归因给共同拥有的 \(A_1\)。真正的偏好出现在分叉以后：查询真实出生地优于查询国籍；查询流经 London 的河流优于查询英国最长河流。</p>
+<p>这就是 Tree-GRPO 的信用分配逻辑：它不直接给每一步一个人工分数，而是固定共同历史，让不同后续在最终结果上竞争。</p>
+<h3 id="3-4-这个例子节省了什么">3.4 这个例子节省了什么</h3>
+<p>假设一条完整轨迹需要三次搜索。普通 GRPO 独立生成六条完整轨迹需要约 18 次搜索。Tree-GRPO 先执行两条三步主干，需要 6 次搜索；四条分支只生成剩余后缀，在这个例子中合计约 6 次搜索，总计约 12 次。</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">普通链式采样：约 18 次搜索
+Tree-GRPO：   约 12 次搜索
+</code></pre></div>
+<p>真实节省比例取决于分叉深度。越靠后的节点，复用前缀越长，新分支越便宜；越靠前的节点，探索范围更大，但节省更少。</p>
+<h2 id="chapter-4">4. 实验结果与消融：它究竟改善了什么</h2>
+
+<h3 id="4-1-三类任务和十一项测试">4.1 三类任务和十一项测试</h3>
+<p>论文覆盖三类问题：单跳问答、多跳问答和开放网页 Agent 问答。单跳、多跳实验使用本地 Wikipedia 检索环境；网页任务使用真实 Bing 搜索接口。单跳和多跳使用精确匹配分数，网页任务使用 F1。</p>
+<p>最明显的提升出现在多跳问答。下面列出不同模型在四个多跳测试集上的平均分：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>模型</th>
+  <th style="text-align:right">链式 GRPO</th>
+  <th style="text-align:right">Tree-GRPO</th>
+  <th style="text-align:right">相对提升</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Qwen2.5-1.5B</td>
+  <td style="text-align:right">11.3</td>
+  <td style="text-align:right">19.1</td>
+  <td style="text-align:right">+69%</td>
+</tr>
+<tr>
+  <td>Qwen2.5-3B</td>
+  <td style="text-align:right">31.8</td>
+  <td style="text-align:right">36.8</td>
+  <td style="text-align:right">+16%</td>
+</tr>
+<tr>
+  <td>Llama3.2-3B</td>
+  <td style="text-align:right">26.7</td>
+  <td style="text-align:right">36.8</td>
+  <td style="text-align:right">+38%</td>
+</tr>
+<tr>
+  <td>Qwen2.5-7B</td>
+  <td style="text-align:right">36.4</td>
+  <td style="text-align:right">37.8</td>
+  <td style="text-align:right">+3.9%</td>
+</tr>
+<tr>
+  <td>Qwen2.5-14B</td>
+  <td style="text-align:right">41.8</td>
+  <td style="text-align:right">45.3</td>
+  <td style="text-align:right">+8.4%</td>
+</tr>
+</tbody>
+</table></div>
+<p>小模型提升尤其明显。论文观察到，链式 GRPO 在 Qwen2.5-1.5B 上很难稳定激发多轮工具使用，而 Tree-GRPO 可以通过更密集的分支比较提供更强学习信号。</p>
+<p>单跳任务的提升较小。例如 Qwen2.5-3B 的单跳平均分从 48.1 提升到 50.0。原因并不神秘：大多数单跳问题只需要一次检索和一次回答，树深通常只有 2，几乎没有足够多的中间决策供树结构发挥作用。</p>
+<h3 id="4-2-同样预算下-树状采样更有效">4.2 同样预算下，树状采样更有效</h3>
+<p>论文将预算近似表示为“每个 prompt 相当于多少条完整轨迹的 token / 工具调用成本”。Qwen2.5-3B 的多跳结果如下：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th style="text-align:right">近似预算</th>
+  <th style="text-align:right">链式 GRPO</th>
+  <th>Tree-GRPO 配置</th>
+  <th style="text-align:right">Tree-GRPO</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td style="text-align:right">2</td>
+  <td style="text-align:right">14.9</td>
+  <td>\(M=1,N=2,L=1\)</td>
+  <td style="text-align:right">31.6</td>
+</tr>
+<tr>
+  <td style="text-align:right">4</td>
+  <td style="text-align:right">31.8</td>
+  <td>\(M=2,N=2,L=1\)</td>
+  <td style="text-align:right">36.8</td>
+</tr>
+<tr>
+  <td style="text-align:right">8</td>
+  <td style="text-align:right">31.4</td>
+  <td>\(M=4,N=2,L=1\)</td>
+  <td style="text-align:right">35.1</td>
+</tr>
+<tr>
+  <td style="text-align:right">8</td>
+  <td style="text-align:right">31.4</td>
+  <td>\(M=2,N=6,L=1\)</td>
+  <td style="text-align:right">36.4</td>
+</tr>
+</tbody>
+</table></div>
+<p>预算约为 2 的 Tree-GRPO 得到 31.6，已经略高于预算约为 8 的链式 GRPO 31.4。论文据此强调：对于这组设置，Tree-GRPO 使用约四分之一 Rollout 预算即可达到或超过链式基线。</p>
+<p>这里真正起作用的不是“树越大越好”，而是预算被重新分配：少量完整主干负责探索，大量后缀分支负责在已有状态附近做有针对性的比较。</p>
+<h3 id="4-3-树内和树间优势的消融">4.3 树内和树间优势的消融</h3>
+<p>优势估计的消融结果很关键。预算约为 4，配置 \(M=2,N=2,L=1\) 时：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>优势方式</th>
+  <th style="text-align:right">多跳平均分</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>链式 GRPO</td>
+  <td style="text-align:right">31.8</td>
+</tr>
+<tr>
+  <td>仅树内优势</td>
+  <td style="text-align:right">训练坍塌</td>
+</tr>
+<tr>
+  <td>仅树间优势</td>
+  <td style="text-align:right">33.8</td>
+</tr>
+<tr>
+  <td>树内 + 树间</td>
+  <td style="text-align:right">36.8</td>
+</tr>
+</tbody>
+</table></div>
+<p>当分支增加到 \(N=6\) 后，仅树内优势不再坍塌，平均分达到 34.6；但树内与树间相加仍然达到最高的 36.4。</p>
+<p>这个结果说明：</p>
+<ul>
+<li>树内优势提供细粒度分支偏好，但小树上的均值和方差估计容易不稳定；</li>
+<li>树间优势本身就能因为更高效的树状采样而优于链式 GRPO；</li>
+<li>两者结合，既保留局部步骤偏好，也保留稳定的全局基线。</li>
+</ul>
+<h3 id="4-4-web-agent-的结果为什么没有多跳问答那么强">4.4 Web Agent 的结果为什么没有多跳问答那么强</h3>
+<p>在网页任务上，Tree-GRPO 仍普遍优于链式 GRPO，但绝对提升较小。以 Qwen2.5-14B 为例：GAIA 平均分从 16.4 提升到 21.0，BrowseComp 只从 2.4 提升到 2.6。</p>
+<p>论文明确指出，主要限制来自训练数据。网页 Agent 的训练集只有 2,200 条，而 BrowseComp 等测试问题可能需要几十次网页交互，训练样本的难度和覆盖范围无法与测试集匹配。因此，现有实验最有力地证明了 Tree-GRPO 在本地单跳、多跳搜索上的价值；对于极长开放网页 DeepResearch，它仍然是一个值得扩展、但证据尚不充分的方法。</p>
+<h2 id="chapter-5">5. 训练过程</h2>
+
+<p>前面一直在讲树怎样长出来，这一节把实验真正怎样训练说清楚。最容易混淆的地方有两个：Tree-GRPO 有没有先做一轮 Agent SFT，以及论文里的“训练样本数”到底指静态 QA 对，还是在线生成的叶子轨迹。</p>
+<h3 id="5-1-先说结论-论文主线没有单独的-sft-阶段">5.1 先说结论：论文主线没有单独的 SFT 阶段</h3>
+<p>论文和公开仓库都没有给出“先用工具轨迹做 SFT，再做 Tree-GRPO”的流水线。发布的训练脚本直接把 Qwen2.5 的基础检查点传给 Tree-GRPO，其中单跳 / 多跳示例使用 <code>Qwen2.5-3B</code>，Web Agent 示例使用 <code>Qwen2.5-14B</code>。ReAct 的交互格式通过 prompt 注入，随后直接进入在线 RL。</p>
+<p>论文也报告了 Base / Instruct 系列模型，并把 Instruct 模型上的 ReAct 当作推理基线。这里要区分两件事：<strong>使用 Instruct 模型做 ReAct baseline</strong>，不等于 Tree-GRPO 在训练前额外跑了一轮 Agent SFT。公开实现里没有这一训练阶段，也没有离线的树状过程数据集。</p>
+<p>所以主线可以画成：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">基础模型 checkpoint
+      ↓
+ReAct prompt 定义 &lt;think&gt; / &lt;search&gt; / &lt;information&gt; / &lt;answer&gt;
+      ↓
+Tree rollout 在线生成主干和分支
+      ↓
+EM / F1 终局奖励 + 格式惩罚
+      ↓
+树内优势 + 树间优势
+      ↓
+GRPO 更新模型参数
+</code></pre></div>
+<p>每一步训练都重新用当前策略采样树。静态数据只提供问题和答案，Thought、query、Observation 以及分叉后的成功 / 失败路径全部在 rollout 时出现。</p>
+<h3 id="5-2-三套实验各用了多少静态样本">5.2 三套实验各用了多少静态样本</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>训练场景</th>
+  <th>训练数据</th>
+  <th style="text-align:right">QA 对数量</th>
+  <th>搜索环境</th>
+  <th>奖励</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>单跳 QA</td>
+  <td>Natural Questions train</td>
+  <td style="text-align:right">79,168</td>
+  <td>本地 Wikipedia / E5，返回 Top-3 passages</td>
+  <td>Exact Match</td>
+</tr>
+<tr>
+  <td>多跳 QA</td>
+  <td>HotpotQA train</td>
+  <td style="text-align:right">90,447</td>
+  <td>本地 Wikipedia / E5，返回 Top-3 passages</td>
+  <td>Exact Match</td>
+</tr>
+<tr>
+  <td>Web Agent QA</td>
+  <td>ASearcher-35K 中过滤的 2,000 条 + WebDancer 的 200 条困难题</td>
+  <td style="text-align:right">2,200</td>
+  <td>Bing API，论文写返回 Top-10</td>
+  <td>F1</td>
+</tr>
+</tbody>
+</table></div>
+<p>这三组数字是<strong>可抽样的问题数量</strong>，不是预先生成好的轨迹数量。单跳和多跳任务没有额外的 reasoning trace；Web Agent 的 2,200 条也只是经过答案过滤的问答对。</p>
+<h3 id="5-3-一个训练-step-会产生多少轨迹">5.3 一个训练 step 会产生多少轨迹</h3>
+<p>默认树参数是 \(M=2,N=2,L=1\)，所以每个问题最后有：</p>
+<div class="math-block">$$
+G=M(LN+1)=2(1\times2+1)=6
+$$</div>
+<p>条叶子轨迹。两条是从问题起点生成的完整主干，另外四条从中间节点续写。它们共享前缀，因此 6 条叶子的成本并不等于 6 条独立完整 rollout；论文把这套设置近似记为每个 prompt 4 条完整轨迹的 token / 工具预算。</p>
+<p>根据论文给出的 step 和 batch，可以估算训练期间送入 sampler 的 prompt 槽位与叶子路径数量：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>场景</th>
+  <th style="text-align:right">step</th>
+  <th style="text-align:right">batch</th>
+  <th style="text-align:right">prompt 槽位（约）</th>
+  <th style="text-align:right">默认叶子路径（约）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>单跳 QA</td>
+  <td style="text-align:right">180</td>
+  <td style="text-align:right">512</td>
+  <td style="text-align:right">92,160</td>
+  <td style="text-align:right">552,960</td>
+</tr>
+<tr>
+  <td>多跳 QA</td>
+  <td style="text-align:right">180</td>
+  <td style="text-align:right">512</td>
+  <td style="text-align:right">92,160</td>
+  <td style="text-align:right">552,960</td>
+</tr>
+<tr>
+  <td>Web Agent QA</td>
+  <td style="text-align:right">34</td>
+  <td style="text-align:right">128</td>
+  <td style="text-align:right">4,352</td>
+  <td style="text-align:right">26,112</td>
+</tr>
+</tbody>
+</table></div>
+<p>这里的“叶子路径”是按 \(6\times\text{prompt 槽位}\) 算出的配置量，不等于 55 万条完全独立的搜索。实际 token、工具调用和有效样本还会受提前作答、搜索上限以及最后一个 batch 影响。Web Agent 的 4,352 个 prompt 槽位接近 2,200 条数据跑 2 个 epoch，这和论文写的“34 steps，约 2 epochs”能够对上。</p>
+<h3 id="5-4-一轮-tree-grpo-更新具体经过哪些阶段">5.4 一轮 Tree-GRPO 更新具体经过哪些阶段</h3>
+<p><strong>阶段一：抽题。</strong> dataloader 从 QA 数据中取一个 prompt batch。单跳 / 多跳是 512，Web Agent 是 128。</p>
+<p><strong>阶段二：初始化主干。</strong> 当前策略从每个问题起点生成 \(M=2\) 条完整 ReAct 轨迹。搜索结果连同历史上下文保存在树节点中。</p>
+<p><strong>阶段三：扩展分支。</strong> 每棵树随机选 \(N=2\) 个非答案节点，从该状态继续生成后缀；扩展进行 \(L=1\) 轮。动态网页结果需要缓存，否则同一个前缀在恢复时可能看到不同页面。</p>
+<p><strong>阶段四：计算奖励。</strong> 单跳 / 多跳用 EM，Web Agent 用 F1。格式不符合协议时扣 0.2。这里没有额外 PRM，也没有逐步人工标签。</p>
+<p><strong>阶段五：估计优势。</strong> 同一棵树的叶子计算树内优势，当前问题的全部叶子计算树间优势，两者相加后送入 GRPO loss。</p>
+<p><strong>阶段六：更新策略。</strong> 优化器更新 actor；下一 step 再用新策略生成一批树。因此 Tree-GRPO 生成的是 on-policy 数据，而不是先离线生成几十万条树轨迹再统一训练。</p>
+<h3 id="5-5-关键参数-论文配置与公开脚本要分开看">5.5 关键参数：论文配置与公开脚本要分开看</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>配置</th>
+  <th style="text-align:right">单跳 / 多跳 QA</th>
+  <th style="text-align:right">Web Agent QA</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Optimizer</td>
+  <td style="text-align:right">AdamW</td>
+  <td style="text-align:right">AdamW</td>
+</tr>
+<tr>
+  <td>学习率</td>
+  <td style="text-align:right">\(1\times10^{-6}\)</td>
+  <td style="text-align:right">\(1\times10^{-6}\)</td>
+</tr>
+<tr>
+  <td>LR warmup</td>
+  <td style="text-align:right">论文表格写 0.285 / 0.5；公开示例脚本为 0.285</td>
+  <td style="text-align:right">0</td>
+</tr>
+<tr>
+  <td>KL</td>
+  <td style="text-align:right">K3，系数 0.001</td>
+  <td style="text-align:right">K3，系数 0.001</td>
+</tr>
+<tr>
+  <td>训练步数</td>
+  <td style="text-align:right">180</td>
+  <td style="text-align:right">34（约 2 epoch）</td>
+</tr>
+<tr>
+  <td>Train batch</td>
+  <td style="text-align:right">512</td>
+  <td style="text-align:right">128</td>
+</tr>
+<tr>
+  <td>PPO mini-batch</td>
+  <td style="text-align:right">64</td>
+  <td style="text-align:right">64</td>
+</tr>
+<tr>
+  <td>Temperature</td>
+  <td style="text-align:right">1.0</td>
+  <td style="text-align:right">1.0</td>
+</tr>
+<tr>
+  <td>最大 Observation</td>
+  <td style="text-align:right">500 tokens</td>
+  <td style="text-align:right">1000 tokens</td>
+</tr>
+<tr>
+  <td>最大工具调用</td>
+  <td style="text-align:right">3</td>
+  <td style="text-align:right">5</td>
+</tr>
+<tr>
+  <td>Tree 参数</td>
+  <td style="text-align:right">\(M=2,N=2,L=1\)</td>
+  <td style="text-align:right">\(M=2,N=2,L=1\)</td>
+</tr>
+<tr>
+  <td>格式惩罚</td>
+  <td style="text-align:right">0.2</td>
+  <td style="text-align:right">0.2</td>
+</tr>
+</tbody>
+</table></div>
+<p>有一处版本差异值得单独记下来。论文 Table 5 把 max response length 写成单跳 / 多跳 4096、Web 8000；当前公开脚本中，4096 / 8000 实际对应 <code>max_prompt_length</code>，<code>max_response_length</code> 则分别是 500 / 2000。Web 脚本的 <code>retriever.topk</code> 还是 3，而论文写 Bing 返回 Top-10。复现时不能只抄一张表，最好固定论文版本和代码 commit，再决定以哪一边为准。</p>
+<h3 id="5-6-资源使用-能确认的是-8-卡单机-卡型和时长没有公开">5.6 资源使用：能确认的是 8 卡单机，卡型和时长没有公开</h3>
+<p>论文没有报告 GPU 型号、训练耗时或完整 GPU-hours。能从官方训练脚本确认的是：示例配置使用 <code>N_NODES=1</code>、<code>n_gpus_per_node=8</code>，也就是<strong>单节点 8 张 GPU</strong>。在没有作者补充信息前，不能把它写成 8×A100 或 8×H100。</p>
+<p>训练侧基于 veRL，rollout 使用 vLLM。单跳 / 多跳脚本把 vLLM 的 <code>gpu_memory_utilization</code> 设为 0.6，Web Agent 设为 0.7；FSDP 的 parameter、gradient 和 optimizer offload 都打开，用 CPU 内存换显存空间。脚本中每卡对应的 PPO micro-batch 为 4，因此 8 卡时 micro-batch 配置为 32。</p>
+<p>检索服务是另一块资源：本地 QA 需要 E5 Wikipedia 索引，官方 README 推荐 <code>faiss-gpu</code>，通常应单独启动检索服务；Web Agent 走 Bing API，并用 Redis 缓存搜索结果，节省重复分支的 API 调用。论文没有给检索服务器的 GPU 数，也没有公布 Web API 总调用量。</p>
+<h3 id="5-7-读完训练配置后-我会怎样复现">5.7 读完训练配置后，我会怎样复现</h3>
+<p>如果只验证方法，我会先选 Qwen2.5-3B 和 HotpotQA，按 1 节点 8 卡、\(M=2,N=2,L=1\)、180 steps 跑通。先确认三件事：共享前缀是否真的复用、树内 / 树间优势分组是否正确、Observation token 是否从 policy loss 中 mask 掉。随后再扩大 \(N\) 或换 Web Agent，而不是一开始就支付 Bing API 和长上下文成本。</p>
+<p>Tree-GRPO 的训练路线并不复杂：它是<strong>直接在线 RL</strong>，复杂的是 rollout runtime。前缀缓存、节点恢复、检索结果一致性和分支并发决定了“树状采样节省预算”能不能在真实系统里兑现。</p>
+<hr />
+<h2 id="参考资料">参考资料</h2>
+<ol>
+<li>Yuxiang Ji et al., <em>Tree Search for LLM Agent Reinforcement Learning</em>, ICLR 2026. 论文主页：<a href="https://arxiv.org/abs/2509.21240">https://arxiv.org/abs/2509.21240</a></li>
+<li>官方代码仓库：<a href="https://github.com/AMAP-ML/Tree-GRPO">https://github.com/AMAP-ML/Tree-GRPO</a></li>
+<li>本文版式参考：常中豪，《verl 里的异步强化学习》。</li>
+</ol>
+
+      </article>
+    </div>
+  </main>
+
+  <footer class="footer"><div class="footer-inner"><span>© 2026 常中豪</span><span>研究与学习记录。</span><a href="stamp-credit-assignment.html">上一篇：STAMP 信用分配 »</a></div></footer>
+  <script src="../assets/app.js?v=3"></script>
+</body>
+</html>

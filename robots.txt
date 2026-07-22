@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://zhonghaochang.github.io/guanping-tech-blog/sitemap.xml
+Sitemap: https://zhonghaochang.github.io/blog/sitemap.xml

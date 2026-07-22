@@ -1,47 +1,47 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/</loc>
+    <loc>https://zhonghaochang.github.io/blog/</loc>
     <lastmod>2026-07-22</lastmod>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/about.html</loc>
+    <loc>https://zhonghaochang.github.io/blog/about.html</loc>
     <lastmod>2026-07-13</lastmod>
     <priority>0.6</priority>
   </url>
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/archives.html</loc>
+    <loc>https://zhonghaochang.github.io/blog/archives.html</loc>
     <lastmod>2026-07-22</lastmod>
     <priority>0.7</priority>
   </url>
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/posts/deepsearch-from-zero.html</loc>
+    <loc>https://zhonghaochang.github.io/blog/posts/deepsearch-from-zero.html</loc>
     <lastmod>2026-07-12</lastmod>
     <priority>0.9</priority>
   </url>
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/posts/agent-harness-multimodal-search.html</loc>
+    <loc>https://zhonghaochang.github.io/blog/posts/agent-harness-multimodal-search.html</loc>
     <lastmod>2026-07-12</lastmod>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/posts/verl-async-rl.html</loc>
+    <loc>https://zhonghaochang.github.io/blog/posts/verl-async-rl.html</loc>
     <lastmod>2026-07-13</lastmod>
     <priority>0.9</priority>
   </url>
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/posts/stamp-credit-assignment.html</loc>
+    <loc>https://zhonghaochang.github.io/blog/posts/stamp-credit-assignment.html</loc>
     <lastmod>2026-07-16</lastmod>
     <priority>0.9</priority>
   </url>
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/posts/tree-grpo-credit-assignment.html</loc>
+    <loc>https://zhonghaochang.github.io/blog/posts/tree-grpo-credit-assignment.html</loc>
     <lastmod>2026-07-19</lastmod>
     <priority>0.9</priority>
   </url>
   <url>
-    <loc>https://zhonghaochang.github.io/guanping-tech-blog/posts/pica-credit-assignment.html</loc>
+    <loc>https://zhonghaochang.github.io/blog/posts/pica-credit-assignment.html</loc>
     <lastmod>2026-07-22</lastmod>
     <priority>0.9</priority>
   </url>

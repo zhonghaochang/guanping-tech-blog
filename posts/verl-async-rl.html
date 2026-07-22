@@ -39,9 +39,9 @@
 
     <div class="article-layout">
       <article class="article">
-        <p>最近在看 verl 新版 PPO Trainer。起因很具体：配置里同时出现了 <code>train_batch_size</code>、<code>ppo_mini_batch_size</code>、<code>rollout.n</code> 和 <code>parameter_sync_step</code>，名字都像“这一轮要用多少数据”，但它们数的不是同一种东西。再加上 <code>rollout.mode=async</code> 和 <code>trainer_mode=separate_async</code> 同时存在，很容易把“异步请求”理解成“异步训练”。</p>
+        <p>verl 新版 PPO Trainer 的配置里同时出现了 <code>train_batch_size</code>、<code>ppo_mini_batch_size</code>、<code>rollout.n</code> 和 <code>parameter_sync_step</code>。它们看起来都在描述“这一轮要用多少数据”，实际统计的却不是同一种对象。<code>rollout.mode=async</code> 和 <code>trainer_mode=separate_async</code> 也属于两个不同层面的异步，不能混为一谈。</p>
 
-        <p>我读的是 verl main 分支的 <code>e5687fce</code>，源码版本标记为 0.9.0.dev。下面不按配置项逐条翻译，而是从一个 prompt 进入系统开始，追到 actor 完成更新、Rollouter 收到新权重为止。这样更容易看清每个 batch 到底在哪里被切开，又在哪里重新合并。</p>
+        <p>本文对照 verl main 分支 <code>e5687fce</code>，源码版本标记为 0.9.0.dev。分析从一个 prompt 进入系统开始，一直追到 actor 完成更新、Rollouter 收到新权重；沿数据流看 batch 在哪里拆分、又在哪里合并，比逐项翻译配置更清楚。</p>
 
         <nav class="article-index" aria-label="文章目录">
           <p class="article-index-title">目录</p>

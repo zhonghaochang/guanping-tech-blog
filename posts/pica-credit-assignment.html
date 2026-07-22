@@ -1,0 +1,1098 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PiCA：用成功概率跃升定位多跳搜索的关键步骤｜常中豪</title>
+  <meta name="description" content="从 pivot 标注、成功概率奖励模型到 PPO 过程奖励，完整拆解 PiCA 的信用分配机制、训练流程、实验结果与公开代码差异。" />
+  <meta name="theme-color" content="#f4f3d9" />
+  <link rel="canonical" href="https://zhonghaochang.github.io/guanping-tech-blog/posts/pica-credit-assignment.html" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="常中豪的网络日志" />
+  <meta property="og:title" content="PiCA：用成功概率跃升定位多跳搜索的关键步骤" />
+  <meta property="og:description" content="从 pivot 标注、成功概率奖励模型到 PPO 过程奖励，完整拆解 PiCA 的信用分配机制、训练流程、实验结果与公开代码差异。" />
+  <meta property="og:url" content="https://zhonghaochang.github.io/guanping-tech-blog/posts/pica-credit-assignment.html" />
+  <meta property="article:published_time" content="2026-07-22" />
+  <meta name="twitter:card" content="summary" />
+  <link rel="icon" href="../assets/favicon.svg" />
+  <link rel="stylesheet" href="../assets/styles.css?v=15" />
+  <script>window.MathJax = {tex: {inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]'], ['$$', '$$']]}, options: {skipHtmlTags: ['script','noscript','style','textarea','pre','code']}};</script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body>
+  <div class="progress"></div>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="../index.html">常中豪的网络日志</a>
+      <button class="icon-button menu-button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation" aria-label="打开导航">☰</button>
+      <div class="nav-links" id="site-navigation"><a href="../index.html">首页</a><a href="../archives.html">归档</a><a href="../about.html">关于</a><button class="icon-button" data-theme-toggle aria-label="切换主题">◐</button></div>
+    </nav>
+  </header>
+
+  <main class="article-shell">
+    <header class="article-masthead">
+      <p class="breadcrumb"><a href="../index.html">首页</a> » <a href="../archives.html">归档</a></p>
+      <div class="article-headline"><h1>PiCA：用成功概率跃升定位多跳搜索的关键步骤</h1></div>
+      <div class="article-side-meta"><strong>常中豪</strong>2026 年 7 月 22 日</div>
+    </header>
+    <div class="article-layout">
+      <article class="article pica-article">
+<div class="note"><strong>相关材料：</strong><a href="https://arxiv.org/abs/2605.09287">论文（arXiv v2）</a> · <a href="https://github.com/novdream/PiCA">官方代码</a>。本文对照论文 v2 与官方仓库 <code>35b15c7</code> 整理；论文公式、附录和当前公开脚本不一致的地方会分别说明。</div>
+<p>多跳搜索 Agent 通常在回答结束时才收到答案 F1。假设一条轨迹搜索了四轮：前两轮找到正确实体，第三轮混淆关系，第四轮又把方向修正回来。最终答案虽然正确，但单个终局分数并不能说明第三轮有害，也不能说明第四轮是关键转折。这就是 PiCA 要处理的信用分配问题。</p>
+<p>PiCA 保留 PPO、Critic 和 GAE，只增加一个沿搜索历史打分的过程奖励模型。这个模型估计“走到当前步骤以后，最终答对的概率”；相邻两轮成功概率的变化再转成过程奖励。下面先把终局奖励的缺口说清楚，再看 pivot 标签怎样训练奖励模型，最后用一条三轮轨迹把公式、实验和训练配置串起来。</p>
+<nav class="article-index" aria-label="文章目录"><p class="article-index-title">目录</p><ol>
+<li><a href="#section-1">终局奖励为什么分不清每一步</a></li>
+<li><a href="#section-2">从 pivot 到逐轮过程奖励</a></li>
+<li><a href="#section-3">把三轮搜索完整算一遍</a></li>
+<li><a href="#section-4">实验：提升来自哪里</a></li>
+<li><a href="#section-5">训练与复现：数据、参数和资源</a></li>
+</ol></nav>
+<p><a id="section-1"></a></p>
+<h2 id="1-终局奖励为什么分不清每一步">1. 终局奖励为什么分不清每一步</h2>
+<h3 id="1-1-ppo-本身不负责定义-什么是好步骤">1.1 PPO 本身不负责定义“什么是好步骤”</h3>
+<p>标准 PPO 的策略目标可以写成：</p>
+<div class="math-block">\[
+L_{\mathrm{PPO}}(\theta)
+=
+\mathbb E_t
+\left[
+\min\left(
+\rho_t(\theta)\hat A_t,\;
+\operatorname{clip}
+\bigl(\rho_t(\theta),1-\epsilon,1+\epsilon\bigr)
+\hat A_t
+\right)
+\right],
+\]</div>
+<p>其中：</p>
+<div class="math-block">\[
+\rho_t(\theta)
+=
+\frac{\pi_\theta(a_t\mid s_t)}
+{\pi_{\theta_{\mathrm{old}}}(a_t\mid s_t)}
+\]</div>
+<p>是新旧策略的概率比，<span class="math-inline">\(\hat A_t\)</span> 是动作优势。</p>
+<p>如果 <span class="math-inline">\(\hat A_t&gt;0\)</span>，PPO 提高当前动作的概率；如果 <span class="math-inline">\(\hat A_t&lt;0\)</span>，PPO 降低当前动作的概率。裁剪项只限制一次更新不要过大。</p>
+<p>这意味着，PPO 解决的是：</p>
+<blockquote>
+<p>已经拿到奖励和优势以后，怎样稳定更新策略。</p>
+</blockquote>
+<p>它并不自动知道：</p>
+<blockquote>
+<p>哪一次搜索真正提供了关键事实，哪一次搜索只是冗余，哪一次搜索引入了错误。</p>
+</blockquote>
+<p>这部分完全取决于奖励设计与信用分配。</p>
+<h3 id="1-2-outcome-only-ppo-只有终局奖励">1.2 Outcome-only PPO 只有终局奖励</h3>
+<p>一条 ReAct 搜索轨迹可以写成：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Turn 1  Thought → Search → Observation
+Turn 2  Thought → Search → Observation
+Turn 3  Thought → Search → Observation
+Turn 4  Final Answer</code></pre></div>
+<p>最常见的结果监督是：</p>
+<div class="math-block">\[
+R_t=
+\begin{cases}
+0,&amp;t&lt;T,\\
+R_{\mathrm{answer}},&amp;t=T.
+\end{cases}
+\]</div>
+<p>假设最终答案正确，奖励序列就是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">[0, 0, 0, 1]</code></pre></div>
+<p>GAE 会把最终奖励向前传播，因此早期动作仍然能够获得训练信号。但终局奖励只说明“最后答对了”，没有直接说明：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Turn 1 找到正确人物：有价值
+Turn 2 找到正确母校：关键进展
+Turn 3 混淆成立年份和授予学位年份：有害
+Turn 4 自我修正并答对：有价值</code></pre></div>
+<p>如果模型经常在成功轨迹里夹杂无效步骤，Outcome-only PPO 可能连这些步骤也一起强化。</p>
+<h3 id="1-3-最终失败也不代表每一步都错">1.3 最终失败也不代表每一步都错</h3>
+<p>反过来，一条失败轨迹可能是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Turn 1  正确识别目标人物
+Turn 2  正确找到人物父亲
+Turn 3  在多个工作机构中选错一个
+Turn 4  最终答案错误</code></pre></div>
+<p>如果只有最终错误奖励，前两步也会受到未来负回报影响。</p>
+<p>因此，多跳搜索的信用分配问题不是简单的“奖励太少”，而是：</p>
+<blockquote>
+<p>一个终局标量很难把长轨迹拆解成局部有用、局部无效和局部有害的行为。</p>
+</blockquote>
+<h3 id="1-4-孤立步骤评分也可能遗漏历史依赖">1.4 孤立步骤评分也可能遗漏历史依赖</h3>
+<p>一种直接补救方法是单独判断当前查询是否相关，例如：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">当前 query 与问题是否相关？
+当前 observation 是否包含答案？</code></pre></div>
+<p>但同一个查询是否有价值，取决于此前已经知道什么。</p>
+<p>例如：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">University of Kansas engineering degrees</code></pre></div>
+<p>在已经确认目标人物母校是 University of Kansas 时很合理；在人物还没有消歧时，同一个查询可能没有依据。</p>
+<p>PiCA 因而不只看当前动作，而是估计：</p>
+<div class="math-block">\[
+P(\text{最终成功}\mid\text{问题、全部历史、当前步骤}).
+\]</div>
+<figure class="article-figure"><img src="../assets/images/pica/pica-vs-ppo.svg" alt="Outcome-only PPO 与 PiCA 的奖励位置对比" loading="lazy" decoding="async" /><figcaption>Outcome-only PPO 与 PiCA 的奖励位置对比</figcaption></figure>
+<hr />
+<p><a id="section-2"></a></p>
+<h2 id="2-从-pivot-到逐轮过程奖励">2. 从 pivot 到逐轮过程奖励</h2>
+<h3 id="2-1-pivot-step-到底是什么">2.1 pivot step 到底是什么</h3>
+<p>先区分三个对象：</p>
+<ol>
+<li><strong>Golden sub-query / sub-answer</strong>：数据集提供的标准子问题与标准子答案；</li>
+<li><strong>Pivot 标签</strong>：裁判对真实 Rollout 中每个步骤给出的 <code>+/-</code> 标签；</li>
+<li><strong>成功增益 <span class="math-inline">\(g_t\)</span></strong>：奖励模型根据相邻成功概率计算出的连续数值。</li>
+</ol>
+<p>裁判只负责指出“哪一步是 pivot”，不会人工填写 <span class="math-inline">\(f_t\)</span> 或 <span class="math-inline">\(g_t\)</span>。</p>
+<p>假设标准关系链为：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">William C. Perry
+        ↓ 母校
+University of Kansas
+        ↓ 开始授予工程学位的时间
+1873</code></pre></div>
+<p>实际轨迹中，如果某一轮：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Search: William C. Perry alma mater
+Observation: ... University of Kansas ...
+Think: 已确认母校，下一步查询该校工程教育历史</code></pre></div>
+<p>那么它成功获得了目标标准子答案 <code>University of Kansas</code>，可以标为正 pivot。</p>
+<p>如果下一轮查询：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Search: University of Kansas founding year</code></pre></div>
+<p>并把学校成立年份误当成授予工程学位年份，它就会被标为负步骤。</p>
+<p>形式上：</p>
+<div class="math-block">\[
+z_t=
+\begin{cases}
+1,&amp;\text{第 }t\text{ 步为正 pivot},\\
+0,&amp;\text{第 }t\text{ 步不是正 pivot}.
+\end{cases}
+\]</div>
+<p>所有正 pivot 的下标组成集合：</p>
+<div class="math-block">\[
+D_p=\{t\mid z_t=1\}.
+\]</div>
+<p>论文的数据生成不是大规模纯人工逐步标注。作者从约 12,000 个 StepSearch/MuSiQue 训练实例出发，每题使用 DeepSeek-V3 与真实检索环境采样 5 条轨迹，再由 LLM-as-a-judge 顺序匹配标准子查询和标准子答案；人工只对随机子集进行审核。</p>
+<h3 id="2-2-奖励模型从什么参数开始">2.2 奖励模型从什么参数开始</h3>
+<p>PiCA 奖励模型以 Qwen2.5-3B-Instruct 为主干，而不是从零随机训练。</p>
+<p>可以把参数写成：</p>
+<div class="math-block">\[
+\theta_{\mathrm{RM}}
+=
+\{\theta_{\mathrm{Qwen}},W_{\mathrm{score}}\}.
+\]</div>
+<p>其中：</p>
+<ul>
+<li><span class="math-inline">\(\theta_{\mathrm{Qwen}}\)</span>：从预训练 Instruct 模型加载；</li>
+<li><span class="math-inline">\(W_{\mathrm{score}}\)</span>：新增的标量打分头，由模型框架初始化。</li>
+</ul>
+<p>公开代码中的头部是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">python</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-python">nn.Linear(config.hidden_size, 1, bias=False)</code></pre></div>
+<p>对每个 token 的隐藏状态 <span class="math-inline">\(h_i\)</span>，产生一个标量：</p>
+<div class="math-block">\[
+u_i=W_{\mathrm{score}}h_i.
+\]</div>
+<p>论文报告奖励模型采用全参数微调，因此主干和新打分头都会更新，而不只是训练最后一层。</p>
+<h3 id="2-3-奖励模型输入与输出">2.3 奖励模型输入与输出</h3>
+<p>训练输入不是孤立的一次 query，而是完整轨迹文本：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Question: ...
+
+&lt;think&gt;...&lt;/think&gt;
+&lt;search&gt;...&lt;/search&gt;
+&lt;information&gt;...&lt;/information&gt;
+&lt;|vision_start|&gt;
+
+&lt;think&gt;...&lt;/think&gt;
+&lt;search&gt;...&lt;/search&gt;
+&lt;information&gt;...&lt;/information&gt;
+&lt;|vision_start|&gt;
+
+&lt;answer&gt;...&lt;/answer&gt;
+&lt;|vision_start|&gt;</code></pre></div>
+<p>论文附录说明，在 Qwen 主干中使用 <code>&lt;|vision_start|&gt;</code> 作为 turn-level 打分位置，标签字段为 <code>value</code>，奖励标签是 <code>{+, -}</code>。</p>
+<p>因为 Qwen 是因果模型，第 <span class="math-inline">\(t\)</span> 个特殊标记位置只能看到它之前的内容。因此一次前向传播就能获得：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">第 1 个标记：问题 + Turn 1
+第 2 个标记：问题 + Turn 1~2
+第 3 个标记：问题 + Turn 1~3</code></pre></div>
+<p>公开代码会为所有 token 输出标量，但损失主要读取特殊标记位置的分数。其他位置的标签设为 <code>-100</code>，不直接计算标签损失；它们仍然通过注意力影响特殊位置的隐藏状态，因此会收到间接梯度。</p>
+<figure class="article-figure"><img src="../assets/images/pica/pica-rm-input-output.svg" alt="PiCA 奖励模型的输入、特殊打分位置与输出" loading="lazy" decoding="async" /><figcaption>PiCA 奖励模型的输入、特殊打分位置与输出</figcaption></figure>
+<h3 id="2-4-论文理论中的成功概率-math">2.4 论文理论中的成功概率 <span class="math-inline">\(f(t)\)</span></h3>
+<p>论文将奖励模型输出解释为：</p>
+<div class="math-block">\[
+f(t)
+=
+P(l=1\mid s_t,a_t),
+\]</div>
+<p>其中：</p>
+<ul>
+<li><span class="math-inline">\(l=1\)</span>：最终答案正确；</li>
+<li><span class="math-inline">\(s_t\)</span>：问题与第 <span class="math-inline">\(t\)</span> 步之前的完整历史；</li>
+<li><span class="math-inline">\(a_t\)</span>：当前思考和搜索动作；</li>
+<li><span class="math-inline">\(f(t)\)</span>：执行完当前步骤后最终答对的概率。</li>
+</ul>
+<p>初始状态：</p>
+<div class="math-block">\[
+f(0)=P(l=1\mid q)
+\]</div>
+<p>表示只看到问题时的先验成功概率。</p>
+<p>所以奖励模型并不是简单输出：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">当前步骤是 pivot 的概率</code></pre></div>
+<p>而是输出：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">走到当前历史后，整条轨迹最终成功的概率</code></pre></div>
+<p>pivot 标签只是训练这个成功概率曲线的辅助监督。</p>
+<h3 id="2-5-相对成功增益-math">2.5 相对成功增益 <span class="math-inline">\(g(t)\)</span></h3>
+<p>PiCA 定义：</p>
+<div class="math-block">\[
+g(t)
+=
+\frac{f(t)-f(t-1)}{f(t-1)}.
+\]</div>
+<p>它衡量当前步骤让成功概率相对变化了多少。</p>
+<p>如果：</p>
+<div class="math-block">\[
+f(t-1)=0.20,\qquad f(t)=0.50,
+\]</div>
+<p>那么：</p>
+<div class="math-block">\[
+g(t)=\frac{0.50-0.20}{0.20}=1.5.
+\]</div>
+<p>表示相对成功概率提升了 150%。</p>
+<p>如果：</p>
+<div class="math-block">\[
+f(t-1)=0.50,\qquad f(t)=0.40,
+\]</div>
+<p>那么：</p>
+<div class="math-block">\[
+g(t)=\frac{0.40-0.50}{0.50}=-0.2.
+\]</div>
+<p>表示当前步骤使成功概率相对下降了 20%。</p>
+<p><span class="math-inline">\(g(t)\)</span> 不是人工标签，也不是概率。它是由两个相邻状态的成功概率自动计算出来的连续值。</p>
+<h3 id="2-6-为什么-ppo-奖励是-math">2.6 为什么 PPO 奖励是 <span class="math-inline">\(\log(1+g_t)\)</span></h3>
+<p>PiCA 使用 Potential-Based Reward Shaping，定义势函数：</p>
+<div class="math-block">\[
+\Phi(s_t)=\log f(t).
+\]</div>
+<p>令中间环境奖励为 0、折扣因子为 1，则塑形奖励为：</p>
+<div class="math-block">\[
+\begin{aligned}
+r_t^{\mathrm{PiCA}}
+&amp;=\Phi(s_t)-\Phi(s_{t-1})\\
+&amp;=\log f(t)-\log f(t-1)\\
+&amp;=\log\frac{f(t)}{f(t-1)}\\
+&amp;=\log(1+g(t)).
+\end{aligned}
+\]</div>
+<p>它直接表示：</p>
+<blockquote>
+<p>当前步骤让成功概率乘上了多大的倍数。</p>
+</blockquote>
+<p>如果成功概率从 0.2 上升到 0.5：</p>
+<div class="math-block">\[
+r_t=\log2.5&gt;0.
+\]</div>
+<p>如果从 0.5 降到 0.4：</p>
+<div class="math-block">\[
+r_t=\log0.8&lt;0.
+\]</div>
+<p>整条轨迹的塑形奖励具有望远镜求和性质：</p>
+<div class="math-block">\[
+\sum_{t=1}^{T}r_t^{\mathrm{PiCA}}
+=
+\log f(T)-\log f(0).
+\]</div>
+<p>这说明 PiCA 把整体进展拆给了中间步骤，但所有步骤加起来仍对应从初始成功概率到最终成功概率的总变化。</p>
+<figure class="article-figure"><img src="../assets/images/pica/pica-probability-curve.svg" alt="成功概率曲线、pivot 与过程奖励" loading="lazy" decoding="async" /><figcaption>成功概率曲线、pivot 与过程奖励</figcaption></figure>
+<h3 id="2-7-math-到底在训练什么">2.7 <span class="math-inline">\(\mathcal L_{\mathrm{gold}}\)</span> 到底在训练什么</h3>
+<p>论文给出的 pivot 监督为：</p>
+<div class="math-block">\[
+\mathcal L_{\mathrm{gold}}
+=
+-\sum_{y\in D}
+\sum_{t\in D_p}
+\log g_t.
+\]</div>
+<p>对于一条标签为：</p>
+<div class="math-block">\[
+z=[1,0,1]
+\]</div>
+<p>的轨迹：</p>
+<div class="math-block">\[
+D_p=\{1,3\},
+\]</div>
+<p>所以：</p>
+<div class="math-block">\[
+\mathcal L_{\mathrm{gold}}
+=
+-\log g_1-\log g_3.
+\]</div>
+<p>它的意图不是直接训练一个二分类器，而是：</p>
+<blockquote>
+<p>对于已经被裁判标为 pivot 的步骤，要求成功概率曲线在这里出现较大的正向跃升。</p>
+</blockquote>
+<p>如果一个 pivot 只有：</p>
+<div class="math-block">\[
+g_t=0.05,
+\]</div>
+<p>那么：</p>
+<div class="math-block">\[
+-\log0.05
+\]</div>
+<p>很大；优化器会推动 <span class="math-inline">\(g_t\)</span> 增大。</p>
+<p>注意，非 pivot 步骤没有以对称的 <span class="math-inline">\(-\log(1-g_t)\)</span> 形式直接进入这个公式。作者希望奖励模型结合最终成败，自主判断非 pivot 是轻微无效还是明显有害。</p>
+<h3 id="2-8-math-保证最终概率方向正确">2.8 <span class="math-inline">\(\mathcal L_{\mathrm{final}}\)</span> 保证最终概率方向正确</h3>
+<p>只让 pivot 上升还不够。模型还必须知道整条轨迹最终成功还是失败。</p>
+<p>论文定义：</p>
+<div class="math-block">\[
+\mathcal L_{\mathrm{final}}
+=
+-l\log f(T)
+-(1-l)\log\bigl(1-f(T)\bigr),
+\]</div>
+<p>其中：</p>
+<div class="math-block">\[
+l=
+\begin{cases}
+1,&amp;\text{最终答案正确},\\
+0,&amp;\text{最终答案错误}.
+\end{cases}
+\]</div>
+<p>因此：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">正确轨迹：推动 f(T) → 1
+错误轨迹：推动 f(T) → 0</code></pre></div>
+<p>总损失为：</p>
+<div class="math-block">\[
+\mathcal L
+=
+\frac{1}{|D|}
+\sum_{y\in D}
+\left(
+\mathcal L_{\mathrm{final}}
++
+\lambda_g\mathcal L_{\mathrm{gold}}
+\right).
+\]</div>
+<p>两个损失分别约束局部转折和整条轨迹：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">L_gold：告诉模型“哪里应该明显进步”
+L_final：告诉模型“最后到底成功还是失败”</code></pre></div>
+<h3 id="2-9-论文公式有一个需要谨慎处理的地方">2.9 论文公式有一个需要谨慎处理的地方</h3>
+<p>论文按原式写出：</p>
+<div class="math-block">\[
+-\log g_t.
+\]</div>
+<p>但 <span class="math-inline">\(g_t\)</span> 不是限制在 <span class="math-inline">\((0,1)\)</span> 内的概率：</p>
+<ul>
+<li>当 <span class="math-inline">\(g_t\le 0\)</span> 时，<span class="math-inline">\(\log g_t\)</span> 在实数域没有定义；</li>
+<li>当 <span class="math-inline">\(g_t&gt;1\)</span> 时，<span class="math-inline">\(-\log g_t\)</span> 可以为负。</li>
+</ul>
+<p>论文的意图是让正 pivot 满足正增益，但公式附近没有清楚给出负值截断、<span class="math-inline">\(\epsilon\)</span> 平移或其他数值稳定化细节。因此，不能只照抄公式就认为已经复现了官方奖励模型。</p>
+<h3 id="2-10-当前公开代码并没有逐字实现论文损失">2.10 当前公开代码并没有逐字实现论文损失</h3>
+<p>公开 <code>prm_trainer.py</code> 先创建 <code>PRMLoss</code>，随后覆盖为 <code>CRMLoss</code>；当 <code>mono_weight&gt;0</code> 时，再覆盖为 <code>TACRMLoss</code>。公开脚本默认启用这一配置，因此当前主分支实际走的是 <code>TACRMLoss</code>。</p>
+<p>代码版更接近风险建模。令：</p>
+<div class="math-block">\[
+h_t=\sigma(u_t)
+\]</div>
+<p>表示第 <span class="math-inline">\(t\)</span> 个检查点的错误风险。</p>
+<p>对于成功轨迹，损失推动：</p>
+<div class="math-block">\[
+h_t\rightarrow0.
+\]</div>
+<p>对于失败轨迹，损失要求至少一个步骤具有较高失败风险，并利用第一个负标签定位错误转折点；额外单调约束鼓励成功轨迹的风险逐渐下降、失败轨迹从错误点以后风险不再随意下降。</p>
+<p>因此需要明确区分：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>层面</th>
+  <th>论文理论表述</th>
+  <th>当前公开主分支</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>输出含义</td>
+  <td>成功概率 <span class="math-inline">\(f_t\)</span></td>
+  <td>更接近错误风险 <span class="math-inline">\(h_t\)</span></td>
+</tr>
+<tr>
+  <td>关键量</td>
+  <td>相对成功增益 <span class="math-inline">\(g_t\)</span></td>
+  <td>hazard / trajectory-aware risk</td>
+</tr>
+<tr>
+  <td>训练损失</td>
+  <td><span class="math-inline">\(\mathcal L_{\mathrm{gold}}+\mathcal L_{\mathrm{final}}\)</span></td>
+  <td>默认 <code>TACRMLoss</code></td>
+</tr>
+<tr>
+  <td>共同目标</td>
+  <td>定位真正改变最终成败概率的转折步骤</td>
+  <td>同左</td>
+</tr>
+</tbody>
+</table></div>
+<p>理解方法时可以用 <span class="math-inline">\(f_t/g_t\)</span> 框架；复现仓库时必须以具体 commit 的代码为准。</p>
+<h3 id="2-11-pica-接入-ppo-后-ppo-骨架没有改变">2.11 PiCA 接入 PPO 后，PPO 骨架没有改变</h3>
+<p>奖励模型训练完成后被冻结。策略模型在线生成新轨迹，PiCA 为每个 turn 提供过程奖励。</p>
+<p>论文中的轮次奖励可概括为：</p>
+<div class="math-block">\[
+R_t=
+\begin{cases}
+r_t^{\mathrm{PiCA}}-c_t,&amp;t&lt;T,\\
+r_t^{\mathrm{PiCA}}-c_t+R_{\mathrm{outcome}},&amp;t=T,
+\end{cases}
+\]</div>
+<p>其中 <span class="math-inline">\(c_t\)</span> 是搜索次数惩罚，最终结果奖励包含格式和答案 F1。</p>
+<p>这些奖励进入标准 GAE：</p>
+<div class="math-block">\[
+\delta_t=R_t+\gamma V(s_{t+1})-V(s_t),
+\]</div>
+<div class="math-block">\[
+\hat A_t
+=
+\sum_{k=0}^{T-t}
+(\gamma\lambda)^k\delta_{t+k}.
+\]</div>
+<p>然后仍然使用 PPO clipped objective 更新 Actor 和 Critic。</p>
+<p>因此：</p>
+<blockquote>
+<p>PiCA 修改的是奖励来源和信用粒度，不是 PPO 的策略优化公式。</p>
+</blockquote>
+<p>奖励最初放在每轮 <code>&lt;search&gt;</code> 的最后一个 token 上，再将 turn-level advantage 分配给这一轮由策略生成的 token。外部检索返回的 <code>&lt;information&gt;</code> 是环境观察，会通过 mask 排除在策略梯度之外。</p>
+<hr />
+<p><a id="section-3"></a></p>
+<h2 id="3-把三轮搜索完整算一遍">3. 把三轮搜索完整算一遍</h2>
+<p>下面沿用官方仓库公开样例的问题结构，但成功概率数值是为了讲解而人为设置的，不是论文真实模型输出。</p>
+<blockquote>
+<p>问题：William C. Perry 的母校何时开始授予工程学位？</p>
+<p>标准答案：1873。</p>
+</blockquote>
+<p>标准关系链为：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">William C. Perry
+        ↓ 母校
+University of Kansas
+        ↓ 开始授予工程学位的时间
+1873</code></pre></div>
+<p>设置三轮搜索：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Turn 1：找到母校                         pivot +
+Turn 2：误查 University of Kansas 成立年份  non-pivot -
+Turn 3：修正目标并找到工程学位年份          pivot +
+Final：回答 1873                         outcome 正确</code></pre></div>
+<p>因此：</p>
+<div class="math-block">\[
+z=[1,0,1],\qquad l=1.
+\]</div>
+<h3 id="3-1-初始成功概率">3.1 初始成功概率</h3>
+<p>模型只看到问题时，假设奖励模型预测：</p>
+<div class="math-block">\[
+f(0)=0.25.
+\]</div>
+<p>这意味着在没有检索的情况下，奖励模型认为最终答对概率只有 25%。</p>
+<h3 id="3-2-turn-1-找到母校">3.2 Turn 1：找到母校</h3>
+<p>模型执行：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">&lt;search&gt;William C. Perry alma mater&lt;/search&gt;</code></pre></div>
+<p>检索结果确认：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">University of Kansas</code></pre></div>
+<p>成功概率上升为：</p>
+<div class="math-block">\[
+f(1)=0.45.
+\]</div>
+<p>相对成功增益：</p>
+<div class="math-block">\[
+g_1
+=
+\frac{0.45-0.25}{0.25}
+=
+0.8.
+\]</div>
+<p>PPO 过程奖励：</p>
+<div class="math-block">\[
+r_1^{\mathrm{PiCA}}
+=
+\log\frac{0.45}{0.25}
+=
+\log1.8
+\approx0.588.
+\]</div>
+<p>这是一个明显正奖励。</p>
+<h3 id="3-3-turn-2-混淆学校成立年份">3.3 Turn 2：混淆学校成立年份</h3>
+<p>模型错误查询：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">&lt;search&gt;University of Kansas founding year&lt;/search&gt;</code></pre></div>
+<p>它把“学校成立时间”偷换成“开始授予工程学位的时间”。</p>
+<p>成功概率下降为：</p>
+<div class="math-block">\[
+f(2)=0.36.
+\]</div>
+<p>于是：</p>
+<div class="math-block">\[
+g_2
+=
+\frac{0.36-0.45}{0.45}
+=
+-0.2,
+\]</div>
+<div class="math-block">\[
+r_2^{\mathrm{PiCA}}
+=
+\log\frac{0.36}{0.45}
+=
+\log0.8
+\approx-0.223.
+\]</div>
+<p>这个错误步骤在当轮立即获得负过程奖励。</p>
+<h3 id="3-4-turn-3-修正查询并找到-1873">3.4 Turn 3：修正查询并找到 1873</h3>
+<p>模型重新执行：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">&lt;search&gt;
+University of Kansas began granting engineering degrees
+&lt;/search&gt;</code></pre></div>
+<p>获得关键证据：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">1873</code></pre></div>
+<p>成功概率上升为：</p>
+<div class="math-block">\[
+f(3)=0.63.
+\]</div>
+<p>因此：</p>
+<div class="math-block">\[
+g_3
+=
+\frac{0.63-0.36}{0.36}
+=
+0.75,
+\]</div>
+<div class="math-block">\[
+r_3^{\mathrm{PiCA}}
+=
+\log\frac{0.63}{0.36}
+=
+\log1.75
+\approx0.560.
+\]</div>
+<h3 id="3-5-手算-math-和-math">3.5 手算 <span class="math-inline">\(\mathcal L_{\mathrm{gold}}\)</span> 和 <span class="math-inline">\(\mathcal L_{\mathrm{final}}\)</span></h3>
+<p>正 pivot 是 Turn 1 和 Turn 3：</p>
+<div class="math-block">\[
+D_p=\{1,3\}.
+\]</div>
+<p>所以：</p>
+<div class="math-block">\[
+\begin{aligned}
+\mathcal L_{\mathrm{gold}}
+&amp;=-\log g_1-\log g_3\\
+&amp;=-\log0.8-\log0.75\\
+&amp;\approx0.223+0.288\\
+&amp;=0.511.
+\end{aligned}
+\]</div>
+<p>最终答案正确：</p>
+<div class="math-block">\[
+l=1.
+\]</div>
+<p>因此：</p>
+<div class="math-block">\[
+\mathcal L_{\mathrm{final}}
+=
+-\log f(3)
+=
+-\log0.63
+\approx0.462.
+\]</div>
+<p>若教学示例中取：</p>
+<div class="math-block">\[
+\lambda_g=1,
+\]</div>
+<p>则：</p>
+<div class="math-block">\[
+\mathcal L
+\approx0.511+0.462
+=0.973.
+\]</div>
+<p>反向传播会推动：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Turn 1 的 f(1) 相对 f(0) 更明显上升
+Turn 3 的 f(3) 相对 f(2) 更明显上升
+最终正确轨迹的 f(3) 更接近 1</code></pre></div>
+<p>Turn 2 没有直接进入 <span class="math-inline">\(\mathcal L_{\mathrm{gold}}\)</span>，但它影响 <span class="math-inline">\(g_3\)</span> 和后续最终预测，因此仍然受到间接约束。</p>
+<h3 id="3-6-检查望远镜求和">3.6 检查望远镜求和</h3>
+<p>三轮 PiCA 奖励相加：</p>
+<div class="math-block">\[
+\begin{aligned}
+\sum_{t=1}^{3}r_t
+&amp;=
+0.588-0.223+0.560\\
+&amp;=0.925.
+\end{aligned}
+\]</div>
+<p>而：</p>
+<div class="math-block">\[
+\log\frac{f(3)}{f(0)}
+=
+\log\frac{0.63}{0.25}
+=
+\log2.52
+\approx0.924.
+\]</div>
+<p>舍入误差以外，两者一致。</p>
+<p>这说明三步过程奖励确实是在分解：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">初始 25% 成功概率
+        ↓
+最终 63% 成功概率</code></pre></div>
+<p>之间的整体变化。</p>
+<h3 id="3-7-outcome-only-ppo-与-pica-ppo-的直接比较">3.7 Outcome-only PPO 与 PiCA-PPO 的直接比较</h3>
+<p>Outcome-only PPO 看到的是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">[0, 0, 0, +最终答案奖励]</code></pre></div>
+<p>PiCA-PPO 看到的是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">[+0.588, -0.223, +0.560, +最终答案奖励]</code></pre></div>
+<p>区别不是 PPO 更新公式，而是 GAE 的输入更有信息：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>Turn</th>
+  <th style="text-align:right">Outcome-only 即时奖励</th>
+  <th style="text-align:right">PiCA 即时奖励</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>找到关键中间实体</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">正</td>
+</tr>
+<tr>
+  <td>走错搜索方向</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">负</td>
+</tr>
+<tr>
+  <td>找到最终证据</td>
+  <td style="text-align:right">0</td>
+  <td style="text-align:right">正</td>
+</tr>
+<tr>
+  <td>输出正确答案</td>
+  <td style="text-align:right">正</td>
+  <td style="text-align:right">正</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="3-8-一个重要细节-负即时奖励不保证负-advantage">3.8 一个重要细节：负即时奖励不保证负 Advantage</h3>
+<p>PPO 最终使用的是 GAE Advantage，而不是单独使用当轮即时奖励。</p>
+<p>即使 Turn 2 的：</p>
+<div class="math-block">\[
+r_2^{\mathrm{PiCA}}&lt;0,
+\]</div>
+<p>如果模型随后成功自我修正，并获得很大的未来回报，那么：</p>
+<div class="math-block">\[
+\hat A_2
+=
+\delta_2+\gamma\lambda\delta_3+\cdots
+\]</div>
+<p>仍然可能为正。</p>
+<p>所以 PiCA 的含义不是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">非 pivot → 一定把这一轮所有 token 概率压低</code></pre></div>
+<p>而是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">当前步骤本身降低了成功概率；
+最终如何更新，还要综合 Critic、未来修正和终局结果。</code></pre></div>
+<p>这也是 PiCA 保留 PPO、Critic 和 GAE 的原因。</p>
+<hr />
+<p><a id="section-4"></a></p>
+<h2 id="4-实验-提升来自哪里">4. 实验：提升来自哪里</h2>
+<h3 id="4-1-七个知识密集型问答数据集">4.1 七个知识密集型问答数据集</h3>
+<p>论文在七个数据集上评估：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">域内：NQ、HotpotQA
+域外：TriviaQA、PopQA、2WikiMultiHopQA、
+      MuSiQue、Bamboogle</code></pre></div>
+<p>策略模型使用 Qwen2.5-3B-Instruct 和 Qwen2.5-7B-Instruct，检索器使用 E5 编码 2018 Wikipedia，每轮返回 Top-3 文档，指标为 EM 和 F1。</p>
+<h3 id="4-2-平均-em-与-f1">4.2 平均 EM 与 F1</h3>
+<p>下面只列出主要 RL 基线和 PiCA：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>Backbone</th>
+  <th>方法</th>
+  <th style="text-align:right">平均 EM</th>
+  <th style="text-align:right">平均 F1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Qwen2.5-3B</td>
+  <td>Search-R1</td>
+  <td style="text-align:right">0.325</td>
+  <td style="text-align:right">0.398</td>
+</tr>
+<tr>
+  <td>Qwen2.5-3B</td>
+  <td>StepSearch</td>
+  <td style="text-align:right">0.296</td>
+  <td style="text-align:right">0.388</td>
+</tr>
+<tr>
+  <td>Qwen2.5-3B</td>
+  <td>TIPS</td>
+  <td style="text-align:right">0.336</td>
+  <td style="text-align:right">0.411</td>
+</tr>
+<tr>
+  <td>Qwen2.5-3B</td>
+  <td><strong>PiCA</strong></td>
+  <td style="text-align:right"><strong>0.396</strong></td>
+  <td style="text-align:right"><strong>0.481</strong></td>
+</tr>
+<tr>
+  <td>Qwen2.5-7B</td>
+  <td>Search-R1</td>
+  <td style="text-align:right">0.385</td>
+  <td style="text-align:right">0.475</td>
+</tr>
+<tr>
+  <td>Qwen2.5-7B</td>
+  <td>StepSearch</td>
+  <td style="text-align:right">0.345</td>
+  <td style="text-align:right">0.444</td>
+</tr>
+<tr>
+  <td>Qwen2.5-7B</td>
+  <td>TIPS</td>
+  <td style="text-align:right">0.417</td>
+  <td style="text-align:right">0.510</td>
+</tr>
+<tr>
+  <td>Qwen2.5-7B</td>
+  <td><strong>PiCA</strong></td>
+  <td style="text-align:right"><strong>0.426</strong></td>
+  <td style="text-align:right"><strong>0.512</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>3B 模型上的增益最明显。以多跳任务为例：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">HotpotQA F1：TIPS 0.415 → PiCA 0.514
+MuSiQue F1：TIPS 0.159 → PiCA 0.235
+Bamboogle F1：TIPS 0.298 → PiCA 0.463</code></pre></div>
+<p>7B 的平均 F1 只从 TIPS 的 0.510 提升到 0.512，而且 PiCA 并非在每一个单项上都最高。例如 7B 的 TriviaQA 和 2Wiki F1 低于 TIPS。</p>
+<p>从这组结果能得出的结论是：</p>
+<blockquote>
+<p>PiCA 对小模型和困难多跳任务的帮助更明显；在较强 7B 模型上，平均收益存在，但并不是所有数据集都稳定领先。</p>
+</blockquote>
+<h3 id="4-3-搜索惩罚为什么会造成-length-hacking">4.3 搜索惩罚为什么会造成 length hacking</h3>
+<p>论文比较三种奖励：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">F1
+F1 + 搜索次数惩罚
+F1 + 搜索次数惩罚 + PiCA</code></pre></div>
+<p>只加惩罚时，模型在早期更快减少冗余搜索，性能上升较快。但继续训练后，模型发现最简单的规避方式是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">搜索会扣分
+    ↓
+尽量少搜索
+    ↓
+回答越来越短
+    ↓
+必要证据没有获取
+    ↓
+性能在约 100 step 后坍塌</code></pre></div>
+<p>PiCA 给高信息增益步骤正奖励，使关键搜索可以抵消搜索成本：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">无效搜索：过程收益小于成本
+关键搜索：过程收益可以覆盖成本</code></pre></div>
+<p>所以模型学到的不是“一律少搜索”，而是“减少无效搜索，保留关键搜索”。</p>
+<h3 id="4-4-奖励模型能否区分-pivot">4.4 奖励模型能否区分 pivot</h3>
+<p>论文把过程奖励归一化到 <span class="math-inline">\([0,1]\)</span> 后观察到：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Pivot step：趋近约 0.80
+Non-pivot：趋近约 0.45</code></pre></div>
+<p>这说明奖励模型学到了统计上的区分。但 non-pivot 的均值并没有降到接近 0，因为非 pivot 不一定是严重错误，也可能只是增益较小、重复确认或不影响最终结果。</p>
+<h3 id="4-5-pica-的局限">4.5 PiCA 的局限</h3>
+<p>第一，奖励模型依赖标准子问题、标准子答案或高质量教师信号。论文附录也承认，当前过程奖励需要外部监督。</p>
+<p>第二，当前主要实验是本地 Wikipedia 多跳问答。对于开放网页 Deep Research，合理路径可能不唯一，甚至不存在唯一标准子问题链，pivot 标签更难定义。</p>
+<p>第三，PiCA 在 PPO 时需要额外运行一个 3B 奖励模型，训练和推理成本都高于只使用规则终局奖励。</p>
+<p>第四，论文理论损失与当前公开代码存在差异，完整 60K PiCA-MuSiQue 轨迹截至仓库当前说明仍计划在论文接收后发布，复现闭环尚不完整。</p>
+<hr />
+<p><a id="section-5"></a></p>
+<h2 id="5-训练与复现-数据-参数和资源">5. 训练与复现：数据、参数和资源</h2>
+<p>PiCA 不是把一个新奖励函数直接塞进 PPO 就能开跑。完整流程还包括轨迹构造、奖励模型监督训练和在线奖励服务。</p>
+<figure class="article-figure"><img src="../assets/images/pica/pica-training-pipeline.svg" alt="PiCA 从数据构造、奖励模型训练到 PPO 的完整流水线" loading="lazy" decoding="async" /><figcaption>PiCA 从数据构造、奖励模型训练到 PPO 的完整流水线</figcaption></figure>
+<h3 id="5-1-第一阶段-构造-pivot-标注轨迹">5.1 第一阶段：构造 pivot 标注轨迹</h3>
+<p>数据构造流程为：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">约 12,000 个 StepSearch / MuSiQue 问题
+        ↓
+每题提供 Golden Sub-Queries / Sub-Answers
+        ↓
+DeepSeek-V3 与真实检索环境交互
+        ↓
+每题采样 5 条轨迹
+        ↓
+约 60,000 条搜索轨迹
+        ↓
+LLM-as-a-judge 逐轮匹配标准子问题和子答案
+        ↓
+得到每轮 +/- pivot 标签
+        ↓
+最终答案与标准答案做 EM
+        ↓
+得到轨迹级成功 / 失败标签
+        ↓
+过滤轮次数与标签数不一致的样本
+        ↓
+人工随机抽查</code></pre></div>
+<p>这 60K 轨迹用于训练奖励模型，不是搜索 Actor 的 SFT 数据。</p>
+<h3 id="5-2-第二阶段-训练奖励模型">5.2 第二阶段：训练奖励模型</h3>
+<p>论文附录与公开脚本能核对到的奖励模型配置如下：</p>
+<p>| 参数 | 设置 |
+|---|---:|
+| Backbone | Qwen2.5-3B-Instruct |
+| 微调方式 | 全参数 |
+| 轨迹数 | 约 60,000 |
+| 最大序列长度 | 32,768 |
+| 全局 batch size | 256 |
+| micro batch size | 16 |
+| Epoch | 1 |
+| 学习率 | <code>5e-6</code> |
+| 精度 | BF16 |
+| 并行 | ZeRO-3 |
+| Gradient checkpointing | 开启 |
+| GPU | 2 |
+| <code>neg_weight</code> / <code>mono_weight</code> | 1.0 / 1.0 |
+| 特殊打分 token | <code>&lt;|vision_start|&gt;</code> |
+| 输入字段 | <code>input</code> |
+| 标签字段 | <code>value</code> |
+| 标签 token | <code>{+, -}</code> |</p>
+<p>一次优化器更新可以理解为：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">完整轨迹 tokenization
+        ↓
+Qwen 主干前向传播
+        ↓
+每个 token 经过标量 score head
+        ↓
+提取特殊标记位置的分数
+        ↓
+结合 +/- 和最终成败计算损失
+        ↓
+梯度经过 score head 回传到全部 Qwen 参数
+        ↓
+优化器更新</code></pre></div>
+<p>如果按 60,000 条轨迹、全局 batch 256、1 个 epoch 粗略计算，并暂时忽略过滤、packing 和末尾不足一个 batch 的处理：</p>
+<div class="math-block">\[
+60000/256\approx234
+\]</div>
+<p>次参数更新。</p>
+<p>这里有一个不能略过的复现缺口：仓库 README 说 PiCA-MuSiQue 轨迹将在论文接收后发布，而当前 <code>train_prm_mistral.sh</code> 的 <code>--dataset</code> 和 <code>--eval_dataset</code> 仍然指向 <code>zhuzilin/Math-Shepherd</code>。也就是说，模型结构和超参数可以检查，数据路径却不能原样照抄。要训练真正的 PiCA RM，还需要作者使用的轨迹序列化与 pivot 标签数据。</p>
+<h3 id="5-3-第三阶段-冻结奖励模型并启动服务">5.3 第三阶段：冻结奖励模型并启动服务</h3>
+<p>官方 Quick Start 的顺序是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">启动本地检索服务
+        ↓
+训练 PiCA 奖励模型
+        ↓
+启动远程奖励模型服务
+        ↓
+运行 PPO</code></pre></div>
+<p>奖励模型在 PPO 期间被冻结。它只负责为新轨迹提供步骤分数，不随 Actor 一起更新。</p>
+<h3 id="5-4-第四阶段-ppo-在线训练搜索策略">5.4 第四阶段：PPO 在线训练搜索策略</h3>
+<p>策略训练流程：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">从 NQ + HotpotQA 抽取问题
+        ↓
+Actor 生成 think / search
+        ↓
+检索器返回 Top-3 Wikipedia 文档
+        ↓
+Actor 继续下一轮或输出 answer
+        ↓
+冻结的 PiCA RM 为每个 turn 打分
+        ↓
+过程奖励 + 搜索惩罚 + 答案 F1 / 格式奖励
+        ↓
+Critic 估计 V(s_t)
+        ↓
+GAE 计算 turn-level Advantage
+        ↓
+把 Advantage 分配给该 turn 的策略 token
+        ↓
+PPO clipped objective 更新 Actor 和 Critic</code></pre></div>
+<h3 id="5-5-论文正文与附录配置并不完全一致">5.5 论文正文与附录配置并不完全一致</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>配置</th>
+  <th style="text-align:right">论文正文</th>
+  <th style="text-align:right">论文附录 / 公开脚本</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>训练步数</td>
+  <td style="text-align:right">200</td>
+  <td style="text-align:right">190</td>
+</tr>
+<tr>
+  <td>GPU</td>
+  <td style="text-align:right">8 × A800</td>
+  <td style="text-align:right">附录表写 4 GPU；公开脚本按 8 GPU 启动</td>
+</tr>
+<tr>
+  <td>最大上下文</td>
+  <td style="text-align:right">4096</td>
+  <td style="text-align:right">prompt 8192 + response / observation 分段限制</td>
+</tr>
+<tr>
+  <td>最大检索轮</td>
+  <td style="text-align:right">4</td>
+  <td style="text-align:right"><code>max_turns=5</code></td>
+</tr>
+<tr>
+  <td>train batch</td>
+  <td style="text-align:right">256</td>
+  <td style="text-align:right">256</td>
+</tr>
+<tr>
+  <td>每轮文档数</td>
+  <td style="text-align:right">3</td>
+  <td style="text-align:right">3</td>
+</tr>
+<tr>
+  <td>优势估计</td>
+  <td style="text-align:right">GAE</td>
+  <td style="text-align:right">GAE</td>
+</tr>
+<tr>
+  <td>KL 系数</td>
+  <td style="text-align:right">论文正文未在 HTML 正确展开</td>
+  <td style="text-align:right">0.001</td>
+</tr>
+<tr>
+  <td>step reward scale</td>
+  <td style="text-align:right">—</td>
+  <td style="text-align:right">0.3</td>
+</tr>
+<tr>
+  <td>baseline step reward</td>
+  <td style="text-align:right">—</td>
+  <td style="text-align:right">0.55</td>
+</tr>
+<tr>
+  <td>outcome reward scale</td>
+  <td style="text-align:right">—</td>
+  <td style="text-align:right">1.5</td>
+</tr>
+</tbody>
+</table></div>
+<p>这些差异可能来自正文概括、附录配置和公开复现实例的计数口径不同。复现时应固定 paper version、Git commit 和具体 shell 脚本，不能把三处参数拼成一份配置。</p>
+<h3 id="5-6-pica-有没有先对-actor-做-agent-sft">5.6 PiCA 有没有先对 Actor 做 Agent SFT</h3>
+<p>论文主流程没有报告：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">60K pivot 轨迹
+    ↓
+Actor SFT
+    ↓
+PiCA PPO</code></pre></div>
+<p>而是：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">60K pivot 轨迹
+    ↓
+训练奖励模型
+    ↓
+冻结奖励模型
+────────────────
+Qwen2.5 Instruct Actor
+    ↓
+直接进入在线 PPO</code></pre></div>
+<p>因此：</p>
+<ul>
+<li>奖励模型阶段是监督训练；</li>
+<li>Actor 阶段是 PPO；</li>
+<li>60K 轨迹不是搜索 Actor 的 SFT 数据量。</li>
+</ul>
+<h3 id="5-7-pica-outcome-only-ppo-与-tree-grpo">5.7 PiCA、Outcome-only PPO 与 Tree-GRPO</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>维度</th>
+  <th>Outcome-only PPO</th>
+  <th>PiCA</th>
+  <th>Tree-GRPO</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>策略优化器</td>
+  <td>PPO</td>
+  <td>PPO</td>
+  <td>GRPO</td>
+</tr>
+<tr>
+  <td>Critic</td>
+  <td>有</td>
+  <td>有</td>
+  <td>通常无</td>
+</tr>
+<tr>
+  <td>中间奖励</td>
+  <td>无或规则</td>
+  <td>学习式 turn reward</td>
+  <td>无显式中间奖励</td>
+</tr>
+<tr>
+  <td>额外奖励模型</td>
+  <td>无</td>
+  <td>有，3B RM</td>
+  <td>无</td>
+</tr>
+<tr>
+  <td>pivot 标签</td>
+  <td>不需要</td>
+  <td>需要训练 RM</td>
+  <td>不需要</td>
+</tr>
+<tr>
+  <td>Rollout 结构</td>
+  <td>独立链</td>
+  <td>独立链</td>
+  <td>共享前缀的树</td>
+</tr>
+<tr>
+  <td>信用来源</td>
+  <td>终局奖励经 GAE 回传</td>
+  <td>成功概率变化 + 终局回传</td>
+  <td>同历史分支的结果对比</td>
+</tr>
+<tr>
+  <td>额外成本</td>
+  <td>最低</td>
+  <td>RM 训练与在线打分</td>
+  <td>额外分支 Rollout</td>
+</tr>
+<tr>
+  <td>适合场景</td>
+  <td>短轨迹、奖励清晰</td>
+  <td>有明确关键子问题的多跳搜索</td>
+  <td>可通过分支比较后续质量的 Agent RL</td>
+</tr>
+</tbody>
+</table></div>
+<p>PiCA 与 Tree-GRPO 的关键差别在信用信号从哪里来：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">PiCA：
+先训练“进度评估器”，再给普通链式轨迹逐轮打分。
+
+Tree-GRPO：
+不训练进度评估器，通过共享前缀的多个后续互相比较。</code></pre></div>
+<h3 id="5-8-一次完整训练需要哪些模型">5.8 一次完整训练需要哪些模型</h3>
+<p>PiCA PPO 阶段至少涉及：</p>
+<div class="code-frame"><div class="code-head"><span class="code-file">text</span><button class="copy-btn" type="button">复制</button></div><pre><code class="language-text">Actor             生成搜索轨迹
+Old / Reference   计算概率比与 KL
+Critic            估计累计回报
+PiCA RM           生成 turn-level 过程奖励
+Retriever         返回外部文档</code></pre></div>
+<p>相比 Outcome-only PPO，多出来的是 PiCA RM；相比 GRPO，还保留独立 Critic。</p>
+<hr />
+<h2 id="总结">总结</h2>
+<p>PiCA 的做法可以分成训练时和策略优化时两部分。训练奖励模型时，pivot 标签标出标准关系链上的关键进展点，最终 EM 提供轨迹级成败；模型据此估计截至当前历史的最终成功概率：</p>
+<div class="math-block">\[
+f(t)=P(l=1\mid s_t,a_t).
+\]</div>
+<p>策略优化时，步骤信用来自相邻成功概率的变化：</p>
+<div class="math-block">\[
+r_t^{\mathrm{PiCA}}
+=
+\log\frac{f(t)}{f(t-1)}.
+\]</div>
+<p>PiCA 没有替换 PPO，而是把这个 turn-level reward 交给 Critic、GAE 和标准 PPO 更新。它比 outcome-only PPO 多付出一套 3B 奖励模型的训练与在线推理成本，换来更细的步骤反馈。</p>
+<p>论文里的 <span class="math-inline">\(f_t/g_t\)</span> 适合解释方法，当前代码主分支的 <code>TACRMLoss</code> 则更接近轨迹感知的错误风险建模。再加上 60K 轨迹尚未随仓库完整发布，现阶段可以严谨复现公开训练骨架，但不能把 README 的 Quick Start 当成论文结果的一键复现脚本。</p>
+<hr />
+<h2 id="参考资料">参考资料</h2>
+<ol>
+<li>Dongyi Liu et al. <a href="https://arxiv.org/abs/2605.09287"><em>PiCA: Pivot-Based Credit Assignment for Search Agentic Reinforcement Learning</em></a>. arXiv:2605.09287, v2, 2026.</li>
+<li><a href="https://github.com/novdream/PiCA">PiCA 官方代码仓库</a>，本文核对 commit <code>35b15c7</code>。</li>
+<li>John Schulman et al. <a href="https://arxiv.org/abs/1707.06347"><em>Proximal Policy Optimization Algorithms</em></a>. arXiv:1707.06347, 2017.</li>
+<li>Andrew Y. Ng, Daishi Harada, Stuart Russell. <a href="https://people.eecs.berkeley.edu/~russell/papers/icml99-shaping.pdf"><em>Policy Invariance Under Reward Transformations: Theory and Application to Reward Shaping</em></a>. ICML, 1999.</li>
+</ol>
+
+      </article>
+    </div>
+  </main>
+
+  <footer class="footer"><div class="footer-inner"><span>© 2026 常中豪</span><span>研究与学习记录。</span><a href="tree-grpo-credit-assignment.html">上一篇：Tree-GRPO »</a></div></footer>
+  <script src="../assets/app.js?v=3"></script>
+</body>
+</html>

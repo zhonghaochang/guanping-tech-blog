@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+<title id="title">Outcome-only PPO 与 PiCA 的奖励位置对比</title>
+<desc id="desc">Outcome-only PPO 与 PiCA 的奖励位置对比</desc>
+<defs>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.12"/>
+  </filter>
+  <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+    <path d="M0,0 L12,6 L0,12 z" fill="#64748b"/>
+  </marker>
+  <style>
+    .bg { fill:#f8fafc; }
+    .panel { fill:white; stroke:#dbe4ee; stroke-width:2; filter:url(#shadow); }
+    .title { font:700 32px system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif; fill:#0f172a; }
+    .subtitle { font:600 22px system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif; fill:#334155; }
+    .body { font:500 18px system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif; fill:#334155; }
+    .small { font:500 15px system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif; fill:#475569; }
+    .mono { font:600 17px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; fill:#0f172a; }
+    .muted { fill:#64748b; }
+    .arrow { stroke:#64748b; stroke-width:3; fill:none; marker-end:url(#arrow); }
+  </style>
+</defs>
+<rect class="bg" width="100%" height="100%"/>
+<text x="60" y="64" class="title">同一条搜索轨迹，两种奖励分配</text><rect x="55" y="105" width="525" height="540" rx="26" class="panel"/><rect x="620" y="105" width="525" height="540" rx="26" class="panel"/><text x="90" y="155" class="subtitle">Outcome-only PPO</text><text x="655" y="155" class="subtitle">PPO + PiCA</text><rect x="90" y="182" width="325" height="72" rx="16" fill="#eef2ff" stroke="#c7d2fe"/><text x="112" y="213" class="body">Turn 1 · 找到关键中间实体</text><rect x="445" y="188" width="90" height="60" rx="30" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="2"/><text x="490" y="227" text-anchor="middle" style="font:700 24px system-ui;fill:#475569">0</text><rect x="655" y="182" width="325" height="72" rx="16" fill="#f0fdfa" stroke="#99f6e4"/><text x="677" y="213" class="body">Turn 1 · 找到关键中间实体</text><rect x="90" y="282" width="325" height="72" rx="16" fill="#eef2ff" stroke="#c7d2fe"/><text x="112" y="313" class="body">Turn 2 · 走错搜索方向</text><rect x="445" y="288" width="90" height="60" rx="30" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="2"/><text x="490" y="327" text-anchor="middle" style="font:700 24px system-ui;fill:#475569">0</text><rect x="655" y="282" width="325" height="72" rx="16" fill="#f0fdfa" stroke="#99f6e4"/><text x="677" y="313" class="body">Turn 2 · 走错搜索方向</text><rect x="90" y="382" width="325" height="72" rx="16" fill="#eef2ff" stroke="#c7d2fe"/><text x="112" y="413" class="body">Turn 3 · 找到最终证据</text><rect x="445" y="388" width="90" height="60" rx="30" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="2"/><text x="490" y="427" text-anchor="middle" style="font:700 24px system-ui;fill:#475569">0</text><rect x="655" y="382" width="325" height="72" rx="16" fill="#f0fdfa" stroke="#99f6e4"/><text x="677" y="413" class="body">Turn 3 · 找到最终证据</text><rect x="90" y="482" width="325" height="72" rx="16" fill="#eef2ff" stroke="#c7d2fe"/><text x="112" y="513" class="body">Final · 输出正确答案</text><rect x="445" y="488" width="90" height="60" rx="30" fill="#dcfce7" stroke="#86efac" stroke-width="2"/><text x="490" y="527" text-anchor="middle" style="font:700 24px system-ui;fill:#15803d">+1</text><rect x="655" y="482" width="325" height="72" rx="16" fill="#f0fdfa" stroke="#99f6e4"/><text x="677" y="513" class="body">Final · 输出正确答案</text><rect x="1010" y="188" width="100" height="60" rx="30" fill="#dcfce7" stroke="#86efac" stroke-width="2"/><text x="1060" y="227" text-anchor="middle" style="font:700 22px system-ui;fill:#15803d">+0.588</text><rect x="1010" y="288" width="100" height="60" rx="30" fill="#fee2e2" stroke="#fca5a5" stroke-width="2"/><text x="1060" y="327" text-anchor="middle" style="font:700 22px system-ui;fill:#b91c1c">−0.223</text><rect x="1010" y="388" width="100" height="60" rx="30" fill="#dcfce7" stroke="#86efac" stroke-width="2"/><text x="1060" y="427" text-anchor="middle" style="font:700 22px system-ui;fill:#15803d">+0.560</text><rect x="1010" y="488" width="100" height="60" rx="30" fill="#dcfce7" stroke="#86efac" stroke-width="2"/><text x="1060" y="527" text-anchor="middle" style="font:700 22px system-ui;fill:#15803d">+1</text><text x="90" y="605" class="small">终局奖励经 GAE 向前传播，但步骤本身没有直接反馈。</text><text x="655" y="605" class="small">成功概率上升获正奖励，下降获负奖励；最后仍保留结果奖励。</text></svg>

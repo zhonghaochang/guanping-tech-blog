@@ -170,6 +170,10 @@ img { max-width: 100%; height: auto; }
 .article-index a { color: var(--ink-soft); }
 .article-index a:hover { color: var(--accent); }
 
+.article-figure { margin: 32px 0 36px; }
+.article-figure img { display: block; width: 100%; height: auto; border: 1px solid var(--rule); border-radius: 7px; background: #fff; }
+.article-figure figcaption { margin-top: 9px; color: var(--muted); font: 12px/1.65 var(--sans); text-align: center; }
+
 .loop-grid { margin: 28px 0; display: grid; grid-template-columns: repeat(5, 1fr); overflow: hidden; border: 1px solid var(--rule); border-radius: 7px; }
 .loop-step { min-height: 90px; padding: 13px 11px; border-right: 1px solid var(--rule); font: 11px/1.6 var(--mono); }
 .loop-step:last-child { border-right: 0; }

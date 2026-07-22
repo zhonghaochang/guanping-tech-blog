@@ -42,8 +42,8 @@
     <div class="article-layout">
       <article class="article tree-grpo-article">
         <div class="note"><strong>相关材料：</strong><a href="https://arxiv.org/abs/2509.21240">论文</a> · <a href="https://github.com/AMAP-ML/Tree-GRPO">官方代码</a>。训练配置同时参考论文 v3 和公开脚本；两者不一致的地方会在正文里单独标出。</div>
-<p>最近在看 Tree-GRPO。起因很具体：在普通 GRPO 里，同一道题会独立采样多条完整轨迹，每条轨迹最终只有一个结果奖励。对于数学题，这种做法已经存在信用分配偏粗的问题；放到多轮搜索 Agent 里，问题会更明显——一次错误可能只发生在第三次搜索，但整条轨迹里的第一步、第二步和第三步却共享同一个优势值。</p>
-<p>Tree-GRPO 没有再训练一个过程奖励模型，也没有要求人工标注“哪一步正确”。它改变的是 <strong>Rollout 的组织方式</strong>：先生成少量完整主干，再从已有轨迹的中间 Agent 步骤继续分叉。这样既能复用搜索前缀，又能在相同历史状态下比较不同后续决策。本文只围绕五个问题展开：过去 GRPO 的信用分配为什么不够细；Tree-GRPO 到底改了什么；一棵树如何被采样和训练；实验结果说明了什么；最后这套训练到底有没有 SFT、用了多少样本和资源。</p>
+<p>普通 GRPO 会为同一道题独立采样多条完整轨迹，并给每条轨迹分配一个结果奖励。放到多轮搜索 Agent 里，这个粒度往往太粗：错误可能只发生在第三次搜索，第一步、第二步和第三步却共享同一个轨迹优势值。</p>
+<p>Tree-GRPO 不额外训练过程奖励模型，也不要求人工标注“哪一步正确”。它改变的是 <strong>Rollout 的组织方式</strong>：先生成少量完整主干，再从轨迹中间的 Agent 步骤继续分叉。共享前缀减少了重复搜索，相同历史下的不同后续又能直接比较。下面从普通 GRPO 的问题开始，依次拆开树怎样生成、优势怎样计算，以及论文实际采用的训练配置。</p>
 <div class="article-index">
 <p class="article-index-title">目录</p>
 <ol>
@@ -557,7 +557,7 @@ Tree-GRPO：   约 12 次搜索
 <h2 id="chapter-5">5. 训练过程</h2>
 
 <p>前面一直在讲树怎样长出来，这一节把实验真正怎样训练说清楚。最容易混淆的地方有两个：Tree-GRPO 有没有先做一轮 Agent SFT，以及论文里的“训练样本数”到底指静态 QA 对，还是在线生成的叶子轨迹。</p>
-<h3 id="5-1-先说结论-论文主线没有单独的-sft-阶段">5.1 先说结论：论文主线没有单独的 SFT 阶段</h3>
+<h3 id="5-1-论文主线没有单独的-sft-阶段">5.1 论文主线没有单独的 SFT 阶段</h3>
 <p>论文和公开仓库都没有给出“先用工具轨迹做 SFT，再做 Tree-GRPO”的流水线。发布的训练脚本直接把 Qwen2.5 的基础检查点传给 Tree-GRPO，其中单跳 / 多跳示例使用 <code>Qwen2.5-3B</code>，Web Agent 示例使用 <code>Qwen2.5-14B</code>。ReAct 的交互格式通过 prompt 注入，随后直接进入在线 RL。</p>
 <p>论文也报告了 Base / Instruct 系列模型，并把 Instruct 模型上的 ReAct 当作推理基线。这里要区分两件事：<strong>使用 Instruct 模型做 ReAct baseline</strong>，不等于 Tree-GRPO 在训练前额外跑了一轮 Agent SFT。公开实现里没有这一训练阶段，也没有离线的树状过程数据集。</p>
 <p>所以主线可以画成：</p>

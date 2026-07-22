@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+<title id="title">PiCA 奖励模型的输入、打分位置与输出</title>
+<desc id="desc">PiCA 奖励模型的输入、打分位置与输出</desc>
+<defs>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.12"/>
+  </filter>
+  <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+    <path d="M0,0 L12,6 L0,12 z" fill="#64748b"/>
+  </marker>
+  <style>
+    .bg { fill:#f8fafc; }
+    .panel { fill:white; stroke:#dbe4ee; stroke-width:2; filter:url(#shadow); }
+    .title { font:700 32px system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif; fill:#0f172a; }
+    .subtitle { font:600 22px system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif; fill:#334155; }
+    .body { font:500 18px system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif; fill:#334155; }
+    .small { font:500 15px system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif; fill:#475569; }
+    .mono { font:600 17px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; fill:#0f172a; }
+    .muted { fill:#64748b; }
+    .arrow { stroke:#64748b; stroke-width:3; fill:none; marker-end:url(#arrow); }
+  </style>
+</defs>
+<rect class="bg" width="100%" height="100%"/>
+<text x="55" y="62" class="title">一次前向传播，评估多个历史前缀</text><rect x="55" y="105" width="715" height="565" rx="26" class="panel"/><text x="88" y="150" class="subtitle">完整轨迹输入</text><rect x="90" y="155" width="555" height="58" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2"/><text x="112" y="190" class="body">Question：William C. Perry 的母校何时开始授予工程学位？</text><rect x="90" y="235" width="555" height="72" rx="14" fill="#eef2ff" stroke="#c7d2fe" stroke-width="2"/><text x="112" y="270" class="body">Turn 1：think → search → information</text><rect x="90" y="355" width="555" height="72" rx="14" fill="#fff7ed" stroke="#fed7aa" stroke-width="2"/><text x="112" y="390" class="body">Turn 2：think → search → information</text><rect x="90" y="475" width="555" height="72" rx="14" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="2"/><text x="112" y="510" class="body">Turn 3：think → search → information</text><rect x="90" y="585" width="555" height="72" rx="14" fill="#f5f3ff" stroke="#ddd6fe" stroke-width="2"/><text x="112" y="620" class="body">Final answer</text><line x1="645" y1="340" x2="722" y2="340" class="arrow"/><rect x="560" y="317" width="85" height="46" rx="12" fill="#0f172a"/><text x="602" y="347" text-anchor="middle" style="font:700 17px ui-monospace;fill:white">&lt;score 1&gt;</text><line x1="645" y1="460" x2="722" y2="460" class="arrow"/><rect x="560" y="437" width="85" height="46" rx="12" fill="#0f172a"/><text x="602" y="467" text-anchor="middle" style="font:700 17px ui-monospace;fill:white">&lt;score 2&gt;</text><line x1="645" y1="580" x2="722" y2="580" class="arrow"/><rect x="560" y="557" width="85" height="46" rx="12" fill="#0f172a"/><text x="602" y="587" text-anchor="middle" style="font:700 17px ui-monospace;fill:white">&lt;score 3&gt;</text><line x1="645" y1="650" x2="722" y2="650" class="arrow"/><rect x="560" y="627" width="85" height="46" rx="12" fill="#0f172a"/><text x="602" y="657" text-anchor="middle" style="font:700 17px ui-monospace;fill:white">&lt;score 4&gt;</text><rect x="820" y="105" width="325" height="565" rx="26" class="panel"/><text x="855" y="150" class="subtitle">Qwen2.5-3B RM</text><rect x="865" y="195" width="235" height="100" rx="18" fill="#eef2ff" stroke="#c7d2fe" stroke-width="2"/><text x="982" y="235" text-anchor="middle" class="body">预训练 Qwen 主干</text><text x="982" y="266" text-anchor="middle" class="small">完整历史表示</text><line x1="982" y1="296" x2="982" y2="348" class="arrow"/><rect x="865" y="355" width="235" height="78" rx="18" fill="#f0fdfa" stroke="#99f6e4" stroke-width="2"/><text x="982" y="402" text-anchor="middle" class="body">标量 score head</text><line x1="982" y1="434" x2="982" y2="480" class="arrow"/><rect x="865" y="488" width="235" height="125" rx="18" fill="#fff7ed" stroke="#fed7aa" stroke-width="2"/><text x="982" y="528" text-anchor="middle" class="body">特殊位置输出</text><text x="982" y="562" text-anchor="middle" class="mono">u₁, u₂, u₃, u₄</text><text x="982" y="592" text-anchor="middle" class="small">论文：成功概率 f(t)</text><text x="982" y="620" text-anchor="middle" class="small">代码：风险式 TACRMLoss</text><text x="75" y="722" class="small">普通 token 没有直接 +/- 标签，但会通过注意力影响特殊位置表示，并接收间接梯度。</text></svg>

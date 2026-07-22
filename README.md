@@ -25,5 +25,8 @@ python -m http.server 8000
 - `posts/deepsearch-from-zero.html`：DeepSearch 轨迹、SFT 与 RL 拆解
 - `posts/agent-harness-multimodal-search.html`：多模态 DeepSearch 训练路线调研
 - `posts/verl-async-rl.html`：结合 verl 源码拆解异步强化学习
+- `posts/stamp-credit-assignment.html`：STAMP 的证据溯源信用分配
+- `posts/tree-grpo-credit-assignment.html`：Tree-GRPO 的树状 Rollout 与信用分配
+- `posts/pica-credit-assignment.html`：PiCA 的 pivot 过程奖励与训练流程
 - `assets/styles.css`：全站样式
 - `assets/app.js`：深色模式、阅读进度、代码复制和目录高亮
